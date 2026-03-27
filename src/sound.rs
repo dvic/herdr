@@ -10,6 +10,7 @@ static SOUND_DONE: &[u8] = include_bytes!("../assets/sounds/done.mp3");
 static SOUND_REQUEST: &[u8] = include_bytes!("../assets/sounds/request.mp3");
 
 /// Which notification sound to play.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sound {
     /// Agent finished work (transitioned to Idle).
     Done,

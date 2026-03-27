@@ -9,6 +9,24 @@ use crate::layout::{find_in_direction, NavDirection, PaneId};
 
 use super::state::{AppState, Mode};
 
+fn notification_sound_for_state_change(
+    is_active_ws: bool,
+    prev_state: AgentState,
+    new_state: AgentState,
+) -> Option<crate::sound::Sound> {
+    if new_state == prev_state {
+        return None;
+    }
+
+    match new_state {
+        AgentState::Waiting => Some(crate::sound::Sound::Request),
+        AgentState::Idle if prev_state != AgentState::Idle && !is_active_ws => {
+            Some(crate::sound::Sound::Done)
+        }
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Workspace operations
 // ---------------------------------------------------------------------------
@@ -168,16 +186,12 @@ impl AppState {
                             pane.seen = false;
                         }
 
-                        // Sound notifications for background state changes
-                        if self.sound.allows(agent) && !is_active_ws && state != prev_state {
-                            match state {
-                                AgentState::Idle if prev_state != AgentState::Idle => {
-                                    crate::sound::play(crate::sound::Sound::Done);
-                                }
-                                AgentState::Waiting => {
-                                    crate::sound::play(crate::sound::Sound::Request);
-                                }
-                                _ => {}
+                        // Waiting prompts should always make noise; done sounds stay background-only.
+                        if self.sound.allows(agent) {
+                            if let Some(sound) =
+                                notification_sound_for_state_change(is_active_ws, prev_state, state)
+                            {
+                                crate::sound::play(sound);
                             }
                         }
 
@@ -406,6 +420,26 @@ mod tests {
 
         let pane = state.workspaces[1].panes.get(&bg_pane_id).unwrap();
         assert!(!pane.seen);
+    }
+
+    #[test]
+    fn waiting_sound_plays_even_in_active_workspace() {
+        assert_eq!(
+            notification_sound_for_state_change(true, AgentState::Busy, AgentState::Waiting),
+            Some(crate::sound::Sound::Request)
+        );
+    }
+
+    #[test]
+    fn done_sound_only_plays_in_background() {
+        assert_eq!(
+            notification_sound_for_state_change(false, AgentState::Busy, AgentState::Idle),
+            Some(crate::sound::Sound::Done)
+        );
+        assert_eq!(
+            notification_sound_for_state_change(true, AgentState::Busy, AgentState::Idle),
+            None
+        );
     }
 
     #[test]
