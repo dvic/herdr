@@ -3,11 +3,13 @@
 # Run unit tests
 test:
     cargo test
+    python3 -m unittest scripts.test_changelog
 
 # Check formatting + run unit tests
 check:
     cargo fmt --check
     cargo test
+    python3 -m unittest scripts.test_changelog
 
 # Run integration tests (LLM-based, requires pi + tmux)
 test-integration:
@@ -29,7 +31,7 @@ clean-tests:
     @rm -f tests/integration/results/*.json tests/integration/results/*.txt 2>/dev/null || true
     @echo "cleaned"
 
-# Bump version, commit, tag, push, trigger release build (usage: just release 0.1.1)
+# Finalize changelog, bump version, commit, tag, push, trigger release build (usage: just release 0.1.1)
 release version:
     @if [ -n "$(git status --porcelain)" ]; then \
         echo "error: commit your changes first"; \
@@ -39,9 +41,11 @@ release version:
         echo "error: tag v{{version}} already exists"; \
         exit 1; \
     fi
+    python3 scripts/changelog.py prepare --version {{version}}
     sed -i.bak 's/^version = ".*"/version = "{{version}}"/' Cargo.toml && rm -f Cargo.toml.bak
     cargo test --quiet
-    git add Cargo.toml Cargo.lock
+    python3 -m unittest scripts.test_changelog
+    git add CHANGELOG.md Cargo.toml Cargo.lock
     git diff --cached --quiet || git commit -m "release: v{{version}}"
     git tag v{{version}}
     git push --follow-tags
