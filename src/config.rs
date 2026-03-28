@@ -13,6 +13,12 @@ pub struct Config {
     pub ui: UiConfig,
 }
 
+#[derive(Debug)]
+pub struct LoadedConfig {
+    pub config: Config,
+    pub diagnostics: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct KeysConfig {
@@ -168,86 +174,146 @@ impl Default for AgentSoundOverrides {
 }
 
 impl Config {
-    pub fn load() -> Self {
+    pub fn load() -> LoadedConfig {
         let path = config_path();
         if path.exists() {
             match std::fs::read_to_string(&path) {
-                Ok(content) => match toml::from_str(&content) {
-                    Ok(config) => return config,
-                    Err(e) => warn!(err = %e, "config parse error, using defaults"),
+                Ok(content) => match toml::from_str::<Config>(&content) {
+                    Ok(config) => {
+                        let diagnostics = config.collect_diagnostics();
+                        return LoadedConfig { config, diagnostics };
+                    }
+                    Err(e) => {
+                        warn!(err = %e, "config parse error, using defaults");
+                        return LoadedConfig {
+                            config: Self::default(),
+                            diagnostics: vec![format!("config parse error: {e}; using defaults")],
+                        };
+                    }
                 },
-                Err(e) => warn!(err = %e, "config read error, using defaults"),
+                Err(e) => {
+                    warn!(err = %e, "config read error, using defaults");
+                    return LoadedConfig {
+                        config: Self::default(),
+                        diagnostics: vec![format!("config read error: {e}; using defaults")],
+                    };
+                }
             }
         }
-        Self::default()
+        LoadedConfig {
+            config: Self::default(),
+            diagnostics: Vec::new(),
+        }
     }
 
     pub fn prefix_key(&self) -> (KeyCode, KeyModifiers) {
-        parse_key_combo_or_warn(
-            &self.keys.prefix,
-            "keys.prefix",
-            (KeyCode::Char('b'), KeyModifiers::CONTROL),
-        )
+        self.validated_keybinds().1
     }
 
     /// Parsed keybinds for navigate mode actions.
     pub fn keybinds(&self) -> Keybinds {
-        Keybinds {
-            new_workspace: parse_key_combo_or_warn(
-                &self.keys.new_workspace,
-                "keys.new_workspace",
-                (KeyCode::Char('n'), KeyModifiers::empty()),
-            ),
-            new_workspace_label: self.keys.new_workspace.clone(),
-            rename_workspace: parse_key_combo_or_warn(
-                &self.keys.rename_workspace,
-                "keys.rename_workspace",
-                (KeyCode::Char('n'), KeyModifiers::SHIFT),
-            ),
-            rename_workspace_label: self.keys.rename_workspace.clone(),
-            close_workspace: parse_key_combo_or_warn(
-                &self.keys.close_workspace,
-                "keys.close_workspace",
-                (KeyCode::Char('d'), KeyModifiers::empty()),
-            ),
-            close_workspace_label: self.keys.close_workspace.clone(),
-            split_vertical: parse_key_combo_or_warn(
-                &self.keys.split_vertical,
-                "keys.split_vertical",
-                (KeyCode::Char('v'), KeyModifiers::empty()),
-            ),
-            split_vertical_label: self.keys.split_vertical.clone(),
-            split_horizontal: parse_key_combo_or_warn(
-                &self.keys.split_horizontal,
-                "keys.split_horizontal",
-                (KeyCode::Char('-'), KeyModifiers::empty()),
-            ),
-            split_horizontal_label: self.keys.split_horizontal.clone(),
-            close_pane: parse_key_combo_or_warn(
-                &self.keys.close_pane,
-                "keys.close_pane",
-                (KeyCode::Char('x'), KeyModifiers::empty()),
-            ),
-            close_pane_label: self.keys.close_pane.clone(),
-            fullscreen: parse_key_combo_or_warn(
-                &self.keys.fullscreen,
-                "keys.fullscreen",
-                (KeyCode::Char('f'), KeyModifiers::empty()),
-            ),
-            fullscreen_label: self.keys.fullscreen.clone(),
-            resize_mode: parse_key_combo_or_warn(
-                &self.keys.resize_mode,
-                "keys.resize_mode",
-                (KeyCode::Char('r'), KeyModifiers::empty()),
-            ),
-            resize_mode_label: self.keys.resize_mode.clone(),
-            toggle_sidebar: parse_key_combo_or_warn(
-                &self.keys.toggle_sidebar,
-                "keys.toggle_sidebar",
-                (KeyCode::Char('b'), KeyModifiers::empty()),
-            ),
-            toggle_sidebar_label: self.keys.toggle_sidebar.clone(),
+        self.validated_keybinds().3
+    }
+
+    pub fn collect_diagnostics(&self) -> Vec<String> {
+        let (prefix_diag, _, keybind_diags, _) = self.validated_keybinds();
+        prefix_diag.into_iter().chain(keybind_diags).collect()
+    }
+
+    fn validated_keybinds(&self) -> (Option<String>, (KeyCode, KeyModifiers), Vec<String>, Keybinds) {
+        #[derive(Clone)]
+        struct Binding<'a> {
+            field: &'a str,
+            label: String,
+            default_label: &'a str,
+            value: (KeyCode, KeyModifiers),
+            default: (KeyCode, KeyModifiers),
         }
+
+        let mut diagnostics = Vec::new();
+        let (prefix, prefix_diag) = parse_key_combo_with_diagnostic(
+            &self.keys.prefix,
+            "keys.prefix",
+            (KeyCode::Char('b'), KeyModifiers::CONTROL),
+        );
+        if let Some(diag) = &prefix_diag {
+            warn!(message = %diag, "config diagnostic");
+        }
+
+        fn binding<'a>(
+            field: &'a str,
+            configured_label: &'a str,
+            default_label: &'a str,
+            default: (KeyCode, KeyModifiers),
+            diagnostics: &mut Vec<String>,
+        ) -> Binding<'a> {
+            let (value, diag) = parse_key_combo_with_diagnostic(configured_label, field, default);
+            let label = if let Some(diag) = diag {
+                diagnostics.push(diag);
+                default_label.to_string()
+            } else {
+                configured_label.to_string()
+            };
+            Binding {
+                field,
+                label,
+                default_label,
+                value,
+                default,
+            }
+        }
+
+        let mut bindings = vec![
+            binding("keys.new_workspace", &self.keys.new_workspace, "n", (KeyCode::Char('n'), KeyModifiers::empty()), &mut diagnostics),
+            binding("keys.rename_workspace", &self.keys.rename_workspace, "shift+n", (KeyCode::Char('n'), KeyModifiers::SHIFT), &mut diagnostics),
+            binding("keys.close_workspace", &self.keys.close_workspace, "d", (KeyCode::Char('d'), KeyModifiers::empty()), &mut diagnostics),
+            binding("keys.split_vertical", &self.keys.split_vertical, "v", (KeyCode::Char('v'), KeyModifiers::empty()), &mut diagnostics),
+            binding("keys.split_horizontal", &self.keys.split_horizontal, "-", (KeyCode::Char('-'), KeyModifiers::empty()), &mut diagnostics),
+            binding("keys.close_pane", &self.keys.close_pane, "x", (KeyCode::Char('x'), KeyModifiers::empty()), &mut diagnostics),
+            binding("keys.fullscreen", &self.keys.fullscreen, "f", (KeyCode::Char('f'), KeyModifiers::empty()), &mut diagnostics),
+            binding("keys.resize_mode", &self.keys.resize_mode, "r", (KeyCode::Char('r'), KeyModifiers::empty()), &mut diagnostics),
+            binding("keys.toggle_sidebar", &self.keys.toggle_sidebar, "b", (KeyCode::Char('b'), KeyModifiers::empty()), &mut diagnostics),
+        ];
+
+        use std::collections::HashMap;
+        let mut seen: HashMap<(KeyCode, KeyModifiers), &str> = HashMap::new();
+        for binding in &mut bindings {
+            if let Some(first_field) = seen.get(&binding.value) {
+                let diag = format!(
+                    "duplicate keybinding: {} conflicts with {}; using default {}",
+                    binding.field, first_field, binding.default_label
+                );
+                warn!(message = %diag, "config diagnostic");
+                diagnostics.push(diag);
+                binding.value = binding.default;
+                binding.label = binding.default_label.to_string();
+            } else {
+                seen.insert(binding.value, binding.field);
+            }
+        }
+
+        let keybinds = Keybinds {
+            new_workspace: bindings[0].value,
+            new_workspace_label: bindings[0].label.clone(),
+            rename_workspace: bindings[1].value,
+            rename_workspace_label: bindings[1].label.clone(),
+            close_workspace: bindings[2].value,
+            close_workspace_label: bindings[2].label.clone(),
+            split_vertical: bindings[3].value,
+            split_vertical_label: bindings[3].label.clone(),
+            split_horizontal: bindings[4].value,
+            split_horizontal_label: bindings[4].label.clone(),
+            close_pane: bindings[5].value,
+            close_pane_label: bindings[5].label.clone(),
+            fullscreen: bindings[6].value,
+            fullscreen_label: bindings[6].label.clone(),
+            resize_mode: bindings[7].value,
+            resize_mode_label: bindings[7].label.clone(),
+            toggle_sidebar: bindings[8].value,
+            toggle_sidebar_label: bindings[8].label.clone(),
+        };
+
+        (prefix_diag, prefix, diagnostics, keybinds)
     }
 }
 
@@ -396,16 +462,21 @@ fn parse_key_combo(s: &str) -> Option<(KeyCode, KeyModifiers)> {
     Some((code, modifiers))
 }
 
-fn parse_key_combo_or_warn(
+fn parse_key_combo_with_diagnostic(
     s: &str,
     field: &str,
     fallback: (KeyCode, KeyModifiers),
-) -> (KeyCode, KeyModifiers) {
-    parse_key_combo(s).unwrap_or_else(|| {
-        warn!(field, value = s, "invalid keybinding, using fallback");
-        fallback
-    })
+) -> ((KeyCode, KeyModifiers), Option<String>) {
+    match parse_key_combo(s) {
+        Some(binding) => (binding, None),
+        None => {
+            let diag = format!("invalid keybinding: {field} = {s:?}; using fallback");
+            warn!(message = %diag, "config diagnostic");
+            (fallback, Some(diag))
+        }
+    }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -552,6 +623,38 @@ split_horizontal = "D"
         let config: Config = toml::from_str(toml).unwrap();
         let kb = config.keybinds();
         assert_eq!(kb.split_horizontal, (KeyCode::Char('d'), KeyModifiers::SHIFT));
+    }
+
+    #[test]
+    fn invalid_keybinding_produces_diagnostic_and_falls_back() {
+        let toml = r#"
+[keys]
+rename_workspace = "wat"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let diagnostics = config.collect_diagnostics();
+        let kb = config.keybinds();
+
+        assert!(diagnostics.iter().any(|d| d.contains("keys.rename_workspace")));
+        assert_eq!(kb.rename_workspace, (KeyCode::Char('n'), KeyModifiers::SHIFT));
+        assert_eq!(kb.rename_workspace_label, "shift+n");
+    }
+
+    #[test]
+    fn duplicate_keybinding_produces_diagnostic_and_falls_back_later_binding() {
+        let toml = r#"
+[keys]
+new_workspace = "g"
+rename_workspace = "g"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let diagnostics = config.collect_diagnostics();
+        let kb = config.keybinds();
+
+        assert!(diagnostics.iter().any(|d| d.contains("duplicate keybinding")));
+        assert_eq!(kb.new_workspace, (KeyCode::Char('g'), KeyModifiers::empty()));
+        assert_eq!(kb.rename_workspace, (KeyCode::Char('n'), KeyModifiers::SHIFT));
+        assert_eq!(kb.rename_workspace_label, "shift+n");
     }
 
     #[test]

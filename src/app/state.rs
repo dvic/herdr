@@ -58,9 +58,10 @@ pub struct AppState {
     pub(crate) drag: Option<DragState>,
     pub selection: Option<Selection>,
     pub context_menu: Option<ContextMenuState>,
-    // Update notification
+    // Notifications
     pub update_available: Option<String>,
     pub update_dismissed: bool,
+    pub config_diagnostic: Option<String>,
     // Config
     pub prefix_code: KeyCode,
     pub prefix_mods: KeyModifiers,
@@ -132,6 +133,7 @@ impl AppState {
             context_menu: None,
             update_available: None,
             update_dismissed: false,
+            config_diagnostic: None,
             prefix_code: KeyCode::Char('b'),
             prefix_mods: KeyModifiers::CONTROL,
             sidebar_width: 26,

@@ -71,11 +71,14 @@ pub fn render(app: &AppState, frame: &mut Frame) {
         Mode::Terminal => {}
     }
 
-    // Update notification (rendered on top of everything)
+    // Notifications (rendered on top of everything)
     if let Some(version) = &app.update_available {
         if !app.update_dismissed {
             render_update_notification(frame, terminal_area, version, app.accent);
         }
+    }
+    if let Some(message) = &app.config_diagnostic {
+        render_config_diagnostic(frame, terminal_area, message);
     }
 }
 
@@ -768,6 +771,29 @@ fn render_update_notification(frame: &mut Frame, area: Rect, version: &str, acce
 ///
 /// Filled dot = needs attention (working, or finished unseen).
 /// Hollow dot = nothing to do here.
+fn render_config_diagnostic(frame: &mut Frame, area: Rect, message: &str) {
+    let text = format!(" config warning: {message} ");
+    let width = text.len() as u16 + 2;
+    let notif_area = Rect::new(
+        area.x + area.width.saturating_sub(width.min(area.width)),
+        area.y,
+        width.min(area.width),
+        1,
+    );
+
+    frame.render_widget(Clear, notif_area);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            text,
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        notif_area,
+    );
+}
+
 fn state_icon_style(state: AgentState, seen: bool) -> (&'static str, Style) {
     match (state, seen) {
         (AgentState::Waiting, _) => ("●", Style::default().fg(Color::Red)),

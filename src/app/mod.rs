@@ -9,7 +9,7 @@ mod input;
 pub mod state;
 
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::layout::Rect;
@@ -29,10 +29,11 @@ pub struct App {
     pub event_tx: mpsc::Sender<AppEvent>,
     event_rx: mpsc::Receiver<AppEvent>,
     no_session: bool,
+    config_diagnostic_deadline: Option<Instant>,
 }
 
 impl App {
-    pub fn new(config: &Config, no_session: bool) -> Self {
+    pub fn new(config: &Config, no_session: bool, config_diagnostic: Option<String>) -> Self {
         let (prefix_code, prefix_mods) = config.prefix_key();
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(64);
 
@@ -79,6 +80,7 @@ impl App {
             context_menu: None,
             update_available: None,
             update_dismissed: false,
+            config_diagnostic,
             prefix_code,
             prefix_mods,
             sidebar_width: config.ui.sidebar_width,
@@ -96,6 +98,10 @@ impl App {
         }
 
         Self {
+            config_diagnostic_deadline: state
+                .config_diagnostic
+                .as_ref()
+                .map(|_| Instant::now() + Duration::from_secs(8)),
             state,
             event_tx,
             event_rx,
@@ -105,6 +111,14 @@ impl App {
 
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while !self.state.should_quit {
+            if self
+                .config_diagnostic_deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                self.config_diagnostic_deadline = None;
+                self.state.config_diagnostic = None;
+            }
+
             terminal.draw(|frame| {
                 crate::ui::compute_view(&mut self.state, frame.area());
                 crate::ui::render(&self.state, frame);

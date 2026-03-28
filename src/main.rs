@@ -192,7 +192,19 @@ fn main() -> io::Result<()> {
         original_hook(info);
     }));
 
-    let config = config::Config::load();
+    let loaded_config = config::Config::load();
+    let config = &loaded_config.config;
+    let config_diagnostic = if loaded_config.diagnostics.is_empty() {
+        None
+    } else if loaded_config.diagnostics.len() == 1 {
+        Some(loaded_config.diagnostics[0].clone())
+    } else {
+        Some(format!(
+            "{} (and {} more)",
+            loaded_config.diagnostics[0],
+            loaded_config.diagnostics.len() - 1
+        ))
+    };
     info!("herdr starting, pid={}", std::process::id());
 
     // Background auto-update (non-blocking, best-effort)
@@ -222,7 +234,7 @@ fn main() -> io::Result<()> {
             std::io::stdout().flush()?;
         }
 
-        let mut app = app::App::new(&config, no_session);
+        let mut app = app::App::new(config, no_session, config_diagnostic);
         let result = app.run(&mut terminal).await;
 
         // Reset modifyOtherKeys if we enabled it

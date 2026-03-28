@@ -7,7 +7,7 @@
 <p align="center">herd your agents.</p>
 
 <p align="center">
-  <a href="https://herdr.dev">herdr.dev</a> · <a href="#install">install</a> · <a href="#usage">usage</a>
+  <a href="https://herdr.dev">herdr.dev</a> · <a href="#install">install</a> · <a href="#usage">usage</a> · <a href="./CONFIGURATION.md">configuration</a>
 </p>
 
 ---
@@ -96,27 +96,19 @@ press `ctrl+b` (the prefix key) to switch back to navigate mode. from there you 
 
 ### navigate mode (prefix: ctrl+b)
 
-| key | action | configurable |
-|-----|--------|:---:|
-| `n` | new workspace | ✓ |
-| `N` | rename workspace | ✓ |
-| `d` | close workspace | ✓ |
-| `1`-`9` | switch to workspace by number | |
-| `↑` `↓` | select workspace | |
-| `enter` | open selected workspace | |
-| `v` | split pane vertically | ✓ |
-| `-` | split pane horizontally | ✓ |
-| `h` `j` `k` `l` | navigate between panes | |
-| `tab` | cycle panes | |
-| `f` | toggle fullscreen | ✓ |
-| `x` | close pane | ✓ |
-| `r` | enter resize mode | ✓ |
-| `b` | toggle sidebar collapse | ✓ |
-| `q` | quit | |
+navigate mode is the workspace control layer. movement actions stay in navigate mode; mutating actions like split, close, new workspace, and sidebar toggle return you to terminal mode.
 
-keys marked ✓ can be changed in `~/.config/herdr/config.toml` under `[keys]`. the prefix key is also configurable.
+common defaults:
+- `n` new workspace
+- `shift+n` rename workspace
+- `d` close workspace
+- `v` / `-` split pane
+- `x` close pane
+- `f` fullscreen
+- `r` resize mode
+- `b` toggle sidebar
 
-keybindings use strings like `ctrl+b`, `f12`, `esc`, `tab`, `-`, or `shift+x`. the most reliable bindings are plain keys, `ctrl+letter`, `esc`/`tab`/`enter`, and function keys. `alt+...` and punctuation-with-modifiers may vary depending on your terminal and tmux setup.
+full keybinding and config reference: [`CONFIGURATION.md`](./CONFIGURATION.md)
 
 ### resize mode
 
@@ -146,54 +138,13 @@ you're in a real terminal. everything works — your shell, vim, htop, ssh, anyt
 
 config file: `~/.config/herdr/config.toml`
 
-generate the default config with all options:
+print the full default config with:
 
 ```bash
 herdr --default-config
 ```
 
-```toml
-[keys]
-# prefix key to enter navigate mode
-prefix = "ctrl+b"
-
-# navigate-mode actions
-new_workspace = "n"
-rename_workspace = "shift+n"
-close_workspace = "d"
-split_vertical = "v"
-split_horizontal = "-"
-close_pane = "x"
-fullscreen = "f"
-resize_mode = "r"
-toggle_sidebar = "b"
-
-[ui]
-# accent color: hex (#89b4fa), named (cyan, blue), or rgb(r,g,b)
-accent = "cyan"
-
-# ask for confirmation before closing a workspace
-confirm_close = true
-
-[ui.sound]
-# play sounds when agents change state in background workspaces
-# a chime when an agent finishes, an alert when one needs input
-enabled = true
-
-[ui.sound.agents]
-# per-agent override: default | on | off
-# droid is muted by default
-claude = "default"
-droid = "off"
-```
-
-### environment variables
-
-| variable | description |
-|----------|-------------|
-| `HERDR_LOG` | log level filter (default: `herdr=info`) |
-
-logs: `~/.config/herdr/herdr.log`
+for all keybindings, UI options, sound settings, and environment variables, see [`CONFIGURATION.md`](./CONFIGURATION.md).
 
 ## session persistence
 
