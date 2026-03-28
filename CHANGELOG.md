@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.1.2] - 2026-03-28
+
 ### Added
 - Added first-run onboarding flow that lets you choose notification preferences (sound and toast) on startup.
 - Added optional visual toast notifications in the top-right corner for background workspace events (completion and attention-needed alerts).
