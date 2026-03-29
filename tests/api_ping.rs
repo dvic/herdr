@@ -32,6 +32,15 @@ fn wait_for_socket(path: &Path, timeout: Duration) {
 }
 
 fn spawn_herdr(config_home: &Path, runtime_dir: &Path, socket_path: &Path) -> SpawnedHerdr {
+    spawn_herdr_with_path(config_home, runtime_dir, socket_path, None)
+}
+
+fn spawn_herdr_with_path(
+    config_home: &Path,
+    runtime_dir: &Path,
+    socket_path: &Path,
+    path_override: Option<&Path>,
+) -> SpawnedHerdr {
     fs::create_dir_all(config_home.join("herdr")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     fs::write(
@@ -54,6 +63,9 @@ fn spawn_herdr(config_home: &Path, runtime_dir: &Path, socket_path: &Path) -> Sp
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", socket_path);
+    if let Some(path) = path_override {
+        cmd.env("PATH", path);
+    }
 
     let child = pair.slave.spawn_command(cmd).unwrap();
 
@@ -73,6 +85,38 @@ fn send_request(socket_path: &Path, json: &str) -> serde_json::Value {
     let mut reader = BufReader::new(stream);
     reader.read_line(&mut line).unwrap();
     serde_json::from_str(&line).unwrap()
+}
+
+fn open_subscription(socket_path: &Path, json: &str) -> (UnixStream, BufReader<UnixStream>) {
+    let mut stream = UnixStream::connect(socket_path).unwrap();
+    stream.write_all(json.as_bytes()).unwrap();
+    stream.write_all(b"\n").unwrap();
+    stream.flush().unwrap();
+
+    let reader = BufReader::new(stream.try_clone().unwrap());
+    (stream, reader)
+}
+
+fn read_json_line(reader: &mut BufReader<UnixStream>, timeout: Duration) -> serde_json::Value {
+    reader.get_ref().set_read_timeout(Some(timeout)).unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    serde_json::from_str(&line).unwrap()
+}
+
+fn wait_for_event(
+    reader: &mut BufReader<UnixStream>,
+    expected: &str,
+    timeout: Duration,
+) -> serde_json::Value {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let value = read_json_line(reader, remaining.max(Duration::from_millis(1)));
+        if value["event"] == expected {
+            return value;
+        }
+    }
 }
 
 #[test]
@@ -239,6 +283,259 @@ fn workspace_list_and_create_round_trip() {
         ),
     );
     assert_eq!(timeout["error"]["code"], "timeout");
+
+    let _ = child.child.kill();
+    let _ = child.child.wait();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn events_subscribe_streams_lifecycle_and_agent_events() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let bin_dir = base.join("bin");
+
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fake_pi = bin_dir.join("pi");
+    fs::write(
+        &fake_pi,
+        "#!/bin/sh\nprintf 'Working...\\n'\nsleep 1\nprintf '\\033[2J\\033[Hdone\\n'\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&fake_pi).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_pi, perms).unwrap();
+    }
+
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let path_override = format!("{}:{}", bin_dir.display(), inherited_path);
+    let mut child = spawn_herdr_with_path(
+        &config_home,
+        &runtime_dir,
+        &socket_path,
+        Some(Path::new(&path_override)),
+    );
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let (_stream, mut reader) = open_subscription(
+        &socket_path,
+        r#"{"id":"sub_life","method":"events.subscribe","params":{"subscriptions":[{"type":"workspace.created"},{"type":"workspace.focused"},{"type":"pane.created"},{"type":"pane.focused"},{"type":"pane.agent_detected"},{"type":"pane.closed"},{"type":"workspace.closed"}]}}"#,
+    );
+
+    let ack = read_json_line(&mut reader, Duration::from_secs(2));
+    assert_eq!(ack["id"], "sub_life");
+    assert_eq!(ack["result"]["type"], "subscription_started");
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_l1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    let workspace_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let workspace_created =
+        wait_for_event(&mut reader, "workspace_created", Duration::from_secs(2));
+    assert_eq!(
+        workspace_created["data"]["workspace"]["workspace_id"],
+        workspace_id
+    );
+    let workspace_focused =
+        wait_for_event(&mut reader, "workspace_focused", Duration::from_secs(2));
+    assert_eq!(workspace_focused["data"]["workspace_id"], workspace_id);
+    let pane_created = wait_for_event(&mut reader, "pane_created", Duration::from_secs(2));
+    let pane_id = pane_created["data"]["pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let pane_focused = wait_for_event(&mut reader, "pane_focused", Duration::from_secs(2));
+    assert_eq!(pane_focused["data"]["pane_id"], pane_id);
+
+    let send_pi = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_l2","method":"pane.send_text","params":{{"pane_id":"{}","text":"pi"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(send_pi["result"]["type"], "ok");
+    let send_enter = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_l3","method":"pane.send_keys","params":{{"pane_id":"{}","keys":["Enter"]}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(send_enter["result"]["type"], "ok");
+
+    let agent_detected = wait_for_event(&mut reader, "pane_agent_detected", Duration::from_secs(3));
+    assert_eq!(agent_detected["data"]["pane_id"], pane_id);
+    assert_eq!(agent_detected["data"]["agent"], "pi");
+
+    let split = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_l4","method":"pane.split","params":{{"target_pane_id":"{}","direction":"right","focus":true}}}}"#,
+            pane_id
+        ),
+    );
+    let split_pane_id = split["result"]["pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let split_created = wait_for_event(&mut reader, "pane_created", Duration::from_secs(2));
+    assert_eq!(split_created["data"]["pane"]["pane_id"], split_pane_id);
+
+    let closed = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_l5","method":"pane.close","params":{{"pane_id":"{}"}}}}"#,
+            split_pane_id
+        ),
+    );
+    assert_eq!(closed["result"]["type"], "ok");
+    let pane_closed = wait_for_event(&mut reader, "pane_closed", Duration::from_secs(2));
+    assert_eq!(pane_closed["data"]["pane_id"], split_pane_id);
+
+    let closed_ws = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_l6","method":"workspace.close","params":{{"workspace_id":"{}"}}}}"#,
+            workspace_id
+        ),
+    );
+    assert_eq!(closed_ws["result"]["type"], "ok");
+    let workspace_closed = wait_for_event(&mut reader, "workspace_closed", Duration::from_secs(2));
+    assert_eq!(workspace_closed["data"]["workspace_id"], workspace_id);
+
+    let _ = child.child.kill();
+    let _ = child.child.wait();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn events_subscribe_streams_output_and_agent_state_events() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let bin_dir = base.join("bin");
+
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fake_pi = bin_dir.join("pi");
+    fs::write(
+        &fake_pi,
+        "#!/bin/sh\nprintf 'Working...\\n'\nsleep 1\nprintf '\\033[2J\\033[Hdone\\n'\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&fake_pi).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_pi, perms).unwrap();
+    }
+
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let path_override = format!("{}:{}", bin_dir.display(), inherited_path);
+    let mut child = spawn_herdr_with_path(
+        &config_home,
+        &runtime_dir,
+        &socket_path,
+        Some(Path::new(&path_override)),
+    );
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_20","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    assert_eq!(created["result"]["workspace"]["workspace_id"], "w_1");
+
+    let panes = send_request(
+        &socket_path,
+        r#"{"id":"req_21","method":"pane.list","params":{}}"#,
+    );
+    let pane_id = panes["result"]["panes"][0]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (_stream, mut reader) = open_subscription(
+        &socket_path,
+        &format!(
+            r#"{{"id":"sub_1","method":"events.subscribe","params":{{"subscriptions":[{{"type":"pane.output_matched","pane_id":"{}","source":"recent","lines":40,"match":{{"type":"substring","value":"hello from socket"}}}},{{"type":"pane.agent_state_changed","pane_id":"{}","state":"idle"}}]}}}}"#,
+            pane_id, pane_id,
+        ),
+    );
+
+    let ack = read_json_line(&mut reader, Duration::from_secs(2));
+    assert_eq!(ack["id"], "sub_1");
+    assert_eq!(ack["result"]["type"], "subscription_started");
+
+    let send_text = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_22","method":"pane.send_text","params":{{"pane_id":"{}","text":"echo hello from socket"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(send_text["result"]["type"], "ok");
+    let send_enter = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_23","method":"pane.send_keys","params":{{"pane_id":"{}","keys":["Enter"]}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(send_enter["result"]["type"], "ok");
+
+    let output_event = read_json_line(&mut reader, Duration::from_secs(3));
+    assert_eq!(output_event["event"], "pane.output_matched");
+    assert_eq!(output_event["data"]["pane_id"], pane_id);
+    assert!(output_event["data"]["matched_line"]
+        .as_str()
+        .unwrap()
+        .contains("hello from socket"));
+    assert!(output_event["data"]["read"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("hello from socket"));
+
+    let send_pi = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_24","method":"pane.send_text","params":{{"pane_id":"{}","text":"pi"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(send_pi["result"]["type"], "ok");
+    let send_enter = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_25","method":"pane.send_keys","params":{{"pane_id":"{}","keys":["Enter"]}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(send_enter["result"]["type"], "ok");
+
+    let agent_idle = read_json_line(&mut reader, Duration::from_secs(8));
+    assert_eq!(agent_idle["event"], "pane.agent_state_changed");
+    assert_eq!(agent_idle["data"]["pane_id"], pane_id);
+    assert_eq!(agent_idle["data"]["state"], "idle");
+    assert_eq!(agent_idle["data"]["agent"], "pi");
 
     let _ = child.child.kill();
     let _ = child.child.wait();

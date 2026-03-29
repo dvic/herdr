@@ -29,6 +29,8 @@ pub struct App {
     pub event_tx: mpsc::Sender<AppEvent>,
     event_rx: mpsc::Receiver<AppEvent>,
     api_rx: std::sync::mpsc::Receiver<crate::api::ApiRequestMessage>,
+    event_hub: crate::api::EventHub,
+    last_focus: Option<(usize, crate::layout::PaneId)>,
     no_session: bool,
     config_diagnostic_deadline: Option<Instant>,
     toast_deadline: Option<Instant>,
@@ -40,6 +42,7 @@ impl App {
         no_session: bool,
         config_diagnostic: Option<String>,
         api_rx: std::sync::mpsc::Receiver<crate::api::ApiRequestMessage>,
+        event_hub: crate::api::EventHub,
     ) -> Self {
         let (prefix_code, prefix_mods) = config.prefix_key();
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(64);
@@ -111,6 +114,13 @@ impl App {
             std::thread::spawn(move || crate::update::auto_update(update_tx));
         }
 
+        let last_focus = state.active.and_then(|idx| {
+            state
+                .workspaces
+                .get(idx)
+                .map(|ws| (idx, ws.layout.focused()))
+        });
+
         Self {
             config_diagnostic_deadline: state
                 .config_diagnostic
@@ -121,6 +131,8 @@ impl App {
             event_tx,
             event_rx,
             api_rx,
+            event_hub,
+            last_focus,
             no_session,
         }
     }
@@ -148,25 +160,15 @@ impl App {
                 crate::ui::render(&self.state, frame);
             })?;
 
+            // Drain internal events first so API reads observe fresh pane state.
+            self.drain_internal_events();
+
             while let Ok(msg) = self.api_rx.try_recv() {
                 let response = self.handle_api_request(msg.request);
                 let _ = msg.respond_to.send(response);
             }
 
-            // Drain internal events
-            while let Ok(ev) = self.event_rx.try_recv() {
-                let previous_toast = self.state.toast.clone();
-                self.state.handle_app_event(ev);
-                if self.state.toast != previous_toast {
-                    self.toast_deadline = self.state.toast.as_ref().map(|toast| {
-                        let duration = match toast.kind {
-                            ToastKind::NeedsAttention => Duration::from_secs(8),
-                            ToastKind::Finished => Duration::from_secs(5),
-                        };
-                        Instant::now() + duration
-                    });
-                }
-            }
+            self.sync_focus_events();
 
             if event::poll(Duration::from_millis(16))? {
                 match event::read()? {
@@ -204,7 +206,114 @@ impl App {
         Ok(())
     }
 
+    fn drain_internal_events(&mut self) {
+        while let Ok(ev) = self.event_rx.try_recv() {
+            match &ev {
+                AppEvent::PaneDied { pane_id } => {
+                    if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
+                        self.emit_event(crate::api::schema::EventEnvelope {
+                            event: crate::api::schema::EventKind::PaneExited,
+                            data: crate::api::schema::EventData::PaneExited {
+                                pane_id: format!("p_{}_{}", ws_idx + 1, pane_id.raw()),
+                                workspace_id: format!("w_{}", ws_idx + 1),
+                            },
+                        });
+                    }
+                }
+                AppEvent::StateChanged {
+                    pane_id,
+                    agent,
+                    state,
+                } => {
+                    if let Some((ws_idx, pane)) = self.find_pane(*pane_id) {
+                        let pane_id = format!("p_{}_{}", ws_idx + 1, pane_id.raw());
+                        let workspace_id = format!("w_{}", ws_idx + 1);
+                        if pane.detected_agent != *agent {
+                            self.emit_event(crate::api::schema::EventEnvelope {
+                                event: crate::api::schema::EventKind::PaneAgentDetected,
+                                data: crate::api::schema::EventData::PaneAgentDetected {
+                                    pane_id: pane_id.clone(),
+                                    workspace_id: workspace_id.clone(),
+                                    agent: agent.map(agent_name),
+                                },
+                            });
+                        }
+                        if pane.state != *state {
+                            self.emit_event(crate::api::schema::EventEnvelope {
+                                event: crate::api::schema::EventKind::PaneAgentStateChanged,
+                                data: crate::api::schema::EventData::PaneAgentStateChanged {
+                                    pane_id,
+                                    workspace_id,
+                                    state: pane_agent_state(*state),
+                                },
+                            });
+                        }
+                    }
+                }
+                AppEvent::UpdateReady { .. } => {}
+            }
+
+            let previous_toast = self.state.toast.clone();
+            self.state.handle_app_event(ev);
+            if self.state.toast != previous_toast {
+                self.toast_deadline = self.state.toast.as_ref().map(|toast| {
+                    let duration = match toast.kind {
+                        ToastKind::NeedsAttention => Duration::from_secs(8),
+                        ToastKind::Finished => Duration::from_secs(5),
+                    };
+                    Instant::now() + duration
+                });
+            }
+        }
+    }
+
+    fn emit_event(&self, event: crate::api::schema::EventEnvelope) {
+        self.event_hub.push(event);
+    }
+
+    fn sync_focus_events(&mut self) {
+        let current_focus = self.state.active.and_then(|idx| {
+            self.state
+                .workspaces
+                .get(idx)
+                .map(|ws| (idx, ws.layout.focused()))
+        });
+        if current_focus == self.last_focus {
+            return;
+        }
+
+        if let Some((ws_idx, pane_id)) = current_focus {
+            self.emit_event(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::WorkspaceFocused,
+                data: crate::api::schema::EventData::WorkspaceFocused {
+                    workspace_id: format!("w_{}", ws_idx + 1),
+                },
+            });
+            self.emit_event(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::PaneFocused,
+                data: crate::api::schema::EventData::PaneFocused {
+                    pane_id: format!("p_{}_{}", ws_idx + 1, pane_id.raw()),
+                    workspace_id: format!("w_{}", ws_idx + 1),
+                },
+            });
+        }
+
+        self.last_focus = current_focus;
+    }
+
+    fn find_pane(
+        &self,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<(usize, &crate::pane::PaneState)> {
+        self.state
+            .workspaces
+            .iter()
+            .enumerate()
+            .find_map(|(ws_idx, ws)| ws.panes.get(&pane_id).map(|pane| (ws_idx, pane)))
+    }
+
     fn handle_api_request(&mut self, request: crate::api::schema::Request) -> String {
+        self.drain_internal_events();
         use bytes::Bytes;
 
         use crate::api::schema::{
@@ -260,12 +369,32 @@ impl App {
                     .or_else(|| std::env::current_dir().ok())
                     .unwrap_or_else(|| std::path::PathBuf::from("/"));
                 match self.create_workspace_with_options(cwd, params.focus) {
-                    Ok(index) => SuccessResponse {
-                        id: request.id,
-                        result: ResponseResult::WorkspaceInfo {
-                            workspace: workspace_info(&self.state, index),
-                        },
-                    },
+                    Ok(index) => {
+                        let workspace = workspace_info(&self.state, index);
+                        self.emit_event(crate::api::schema::EventEnvelope {
+                            event: crate::api::schema::EventKind::WorkspaceCreated,
+                            data: crate::api::schema::EventData::WorkspaceCreated {
+                                workspace: workspace.clone(),
+                            },
+                        });
+                        if let Some(pane_id) = self.state.workspaces[index]
+                            .layout
+                            .pane_ids()
+                            .first()
+                            .copied()
+                        {
+                            if let Some(pane) = self.pane_info(index, pane_id) {
+                                self.emit_event(crate::api::schema::EventEnvelope {
+                                    event: crate::api::schema::EventKind::PaneCreated,
+                                    data: crate::api::schema::EventData::PaneCreated { pane },
+                                });
+                            }
+                        }
+                        SuccessResponse {
+                            id: request.id,
+                            result: ResponseResult::WorkspaceInfo { workspace },
+                        }
+                    }
                     Err(err) => {
                         return serde_json::to_string(&ErrorResponse {
                             id: request.id,
@@ -276,6 +405,160 @@ impl App {
                         })
                         .unwrap();
                     }
+                }
+            }
+            Method::WorkspaceFocus(target) => {
+                let Some(index) = parse_workspace_id(&target.workspace_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "workspace_not_found".into(),
+                            message: format!("workspace {} not found", target.workspace_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                if self.state.workspaces.get(index).is_none() {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "workspace_not_found".into(),
+                            message: format!("workspace {} not found", target.workspace_id),
+                        },
+                    })
+                    .unwrap();
+                }
+                self.state.switch_workspace(index);
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::WorkspaceInfo {
+                        workspace: workspace_info(&self.state, index),
+                    },
+                }
+            }
+            Method::WorkspaceRename(params) => {
+                let Some(index) = parse_workspace_id(&params.workspace_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "workspace_not_found".into(),
+                            message: format!("workspace {} not found", params.workspace_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(ws) = self.state.workspaces.get_mut(index) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "workspace_not_found".into(),
+                            message: format!("workspace {} not found", params.workspace_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                ws.set_custom_name(params.label.clone());
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::WorkspaceInfo {
+                        workspace: workspace_info(&self.state, index),
+                    },
+                }
+            }
+            Method::WorkspaceClose(target) => {
+                let Some(index) = parse_workspace_id(&target.workspace_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "workspace_not_found".into(),
+                            message: format!("workspace {} not found", target.workspace_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                if self.state.workspaces.get(index).is_none() {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "workspace_not_found".into(),
+                            message: format!("workspace {} not found", target.workspace_id),
+                        },
+                    })
+                    .unwrap();
+                }
+                self.state.selected = index;
+                self.state.close_selected_workspace();
+                self.emit_event(crate::api::schema::EventEnvelope {
+                    event: crate::api::schema::EventKind::WorkspaceClosed,
+                    data: crate::api::schema::EventData::WorkspaceClosed {
+                        workspace_id: target.workspace_id,
+                    },
+                });
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::Ok {},
+                }
+            }
+            Method::PaneSplit(params) => {
+                let Some((ws_idx, target_pane_id)) = parse_pane_id(&params.target_pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.target_pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let (rows, cols) = self.state.estimate_pane_size();
+                let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.target_pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                ws.layout.focus_pane(target_pane_id);
+                let direction = match params.direction {
+                    crate::api::schema::SplitDirection::Right => {
+                        ratatui::layout::Direction::Horizontal
+                    }
+                    crate::api::schema::SplitDirection::Down => {
+                        ratatui::layout::Direction::Vertical
+                    }
+                };
+                let new_pane_id = match ws.split_focused(
+                    direction,
+                    rows,
+                    cols,
+                    params.cwd.map(std::path::PathBuf::from),
+                ) {
+                    Ok(new_pane_id) => new_pane_id,
+                    Err(err) => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "pane_split_failed".into(),
+                                message: err.to_string(),
+                            },
+                        })
+                        .unwrap();
+                    }
+                };
+                if !params.focus {
+                    ws.layout.focus_pane(target_pane_id);
+                }
+                let pane = self.pane_info(ws_idx, new_pane_id).unwrap();
+                self.emit_event(crate::api::schema::EventEnvelope {
+                    event: crate::api::schema::EventKind::PaneCreated,
+                    data: crate::api::schema::EventData::PaneCreated { pane: pane.clone() },
+                });
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::PaneInfo { pane },
                 }
             }
             Method::PaneList(PaneListParams { workspace_id }) => {
@@ -389,6 +672,58 @@ impl App {
                         },
                     })
                     .unwrap();
+                }
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::Ok {},
+                }
+            }
+            Method::PaneClose(target) => {
+                let Some((ws_idx, pane_id)) = parse_pane_id(&target.pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", target.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", target.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let workspace_id = format!("w_{}", ws_idx + 1);
+                let pane_count = ws.layout.pane_count();
+                if pane_count <= 1 {
+                    self.state.selected = ws_idx;
+                    self.state.close_selected_workspace();
+                    self.emit_event(crate::api::schema::EventEnvelope {
+                        event: crate::api::schema::EventKind::PaneClosed,
+                        data: crate::api::schema::EventData::PaneClosed {
+                            pane_id: target.pane_id.clone(),
+                            workspace_id: workspace_id.clone(),
+                        },
+                    });
+                    self.emit_event(crate::api::schema::EventEnvelope {
+                        event: crate::api::schema::EventKind::WorkspaceClosed,
+                        data: crate::api::schema::EventData::WorkspaceClosed { workspace_id },
+                    });
+                } else {
+                    ws.remove_pane(pane_id);
+                    self.emit_event(crate::api::schema::EventEnvelope {
+                        event: crate::api::schema::EventKind::PaneClosed,
+                        data: crate::api::schema::EventData::PaneClosed {
+                            pane_id: target.pane_id,
+                            workspace_id,
+                        },
+                    });
                 }
                 SuccessResponse {
                     id: request.id,

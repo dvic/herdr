@@ -132,11 +132,44 @@ pub enum ReadSource {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventsSubscribeParams {
-    pub events: Vec<EventKind>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pane_id: Option<String>,
+    pub subscriptions: Vec<Subscription>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Subscription {
+    #[serde(rename = "workspace.created")]
+    WorkspaceCreated {},
+    #[serde(rename = "workspace.closed")]
+    WorkspaceClosed {},
+    #[serde(rename = "workspace.focused")]
+    WorkspaceFocused {},
+    #[serde(rename = "pane.created")]
+    PaneCreated {},
+    #[serde(rename = "pane.closed")]
+    PaneClosed {},
+    #[serde(rename = "pane.focused")]
+    PaneFocused {},
+    #[serde(rename = "pane.exited")]
+    PaneExited {},
+    #[serde(rename = "pane.agent_detected")]
+    PaneAgentDetected {},
+    #[serde(rename = "pane.output_matched")]
+    PaneOutputMatched {
+        pane_id: String,
+        source: ReadSource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lines: Option<u32>,
+        r#match: OutputMatch,
+        #[serde(default = "default_true")]
+        strip_ansi: bool,
+    },
+    #[serde(rename = "pane.agent_state_changed")]
+    PaneAgentStateChanged {
+        pane_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<PaneAgentState>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,9 +303,7 @@ pub enum ResponseResult {
     PaneRead {
         read: PaneReadResult,
     },
-    SubscriptionStarted {
-        events: Vec<EventKind>,
-    },
+    SubscriptionStarted {},
     WaitMatched {
         event: EventEnvelope,
     },
@@ -322,6 +353,43 @@ pub struct PaneReadResult {
 pub struct EventEnvelope {
     pub event: EventKind,
     pub data: EventData,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubscriptionEventKind {
+    #[serde(rename = "pane.output_matched")]
+    PaneOutputMatched,
+    #[serde(rename = "pane.agent_state_changed")]
+    PaneAgentStateChanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscriptionEventEnvelope {
+    pub event: SubscriptionEventKind,
+    pub data: SubscriptionEventData,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SubscriptionEventData {
+    PaneOutputMatched(PaneOutputMatchedEvent),
+    PaneAgentStateChanged(PaneAgentStateChangedEvent),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneOutputMatchedEvent {
+    pub pane_id: String,
+    pub matched_line: String,
+    pub read: PaneReadResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneAgentStateChangedEvent {
+    pub pane_id: String,
+    pub workspace_id: String,
+    pub state: PaneAgentState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -473,6 +541,79 @@ mod tests {
 
         let json = serde_json::to_string(&event).unwrap();
         let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, event);
+    }
+
+    #[test]
+    fn subscribe_request_parses_parameterized_subscriptions() {
+        let json = r#"
+        {
+            "id": "sub_1",
+            "method": "events.subscribe",
+            "params": {
+                "subscriptions": [
+                    {
+                        "type": "pane.output_matched",
+                        "pane_id": "p_1_1",
+                        "source": "recent",
+                        "lines": 200,
+                        "match": { "type": "substring", "value": "auth: received" }
+                    },
+                    {
+                        "type": "pane.agent_state_changed",
+                        "pane_id": "p_1_1",
+                        "state": "waiting"
+                    }
+                ]
+            }
+        }
+        "#;
+
+        let request: Request = serde_json::from_str(json).unwrap();
+        let Method::EventsSubscribe(params) = request.method else {
+            panic!("wrong method parsed");
+        };
+        assert_eq!(params.subscriptions.len(), 2);
+        assert!(matches!(
+            &params.subscriptions[0],
+            Subscription::PaneOutputMatched {
+                pane_id,
+                source: ReadSource::Recent,
+                lines: Some(200),
+                r#match: OutputMatch::Substring { value },
+                strip_ansi: true,
+            } if pane_id == "p_1_1" && value == "auth: received"
+        ));
+        assert!(matches!(
+            &params.subscriptions[1],
+            Subscription::PaneAgentStateChanged {
+                pane_id,
+                state: Some(PaneAgentState::Waiting),
+            } if pane_id == "p_1_1"
+        ));
+    }
+
+    #[test]
+    fn subscription_event_envelope_round_trips() {
+        let event = SubscriptionEventEnvelope {
+            event: SubscriptionEventKind::PaneOutputMatched,
+            data: SubscriptionEventData::PaneOutputMatched(PaneOutputMatchedEvent {
+                pane_id: "p_1_1".into(),
+                matched_line: "auth: received".into(),
+                read: PaneReadResult {
+                    pane_id: "p_1_1".into(),
+                    workspace_id: "w_1".into(),
+                    source: ReadSource::Recent,
+                    text: "auth: received\n".into(),
+                    revision: 0,
+                    truncated: false,
+                },
+            }),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"pane.output_matched\""));
+        let restored: SubscriptionEventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, event);
     }
 

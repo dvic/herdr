@@ -7,7 +7,7 @@
 <p align="center">herd your agents.</p>
 
 <p align="center">
-  <a href="https://herdr.dev">herdr.dev</a> · <a href="#install">install</a> · <a href="#usage">usage</a> · <a href="./CONFIGURATION.md">configuration</a>
+  <a href="https://herdr.dev">herdr.dev</a> · <a href="#install">install</a> · <a href="#usage">usage</a> · <a href="./CONFIGURATION.md">configuration</a> · <a href="./SOCKET_API.md">socket api</a>
 </p>
 
 ---
@@ -174,12 +174,25 @@ this means detection works with any supported agent, installed any way, with zer
 
 the heuristics are pattern-matched against each agent's actual terminal output: prompt boxes, spinners, "waiting for input" messages, tool execution indicators. detection runs on a separate async task per pane, polled every 300-500ms, decoupled from terminal rendering.
 
+## socket api
+
+herdr now has a local unix socket API for scripts, tools, and coding agents.
+
+you can:
+- create, focus, rename, and close workspaces
+- list, inspect, read, split, and close panes
+- send text / keys into panes
+- wait for output matches
+- subscribe to lifecycle, agent, and output-match events over a single long-lived connection
+
+see [`SOCKET_API.md`](./SOCKET_API.md) for request shapes, examples, and subscription behavior.
+
 ## what's coming
 
-- **notification hooks**: a socket API so any agent or script can report its state to herdr. for agents without built-in detection, wire up a simple hook.
+- **notification hooks**: richer agent/script-side state reporting on top of the socket foundation, so unsupported tools can report status directly to herdr.
 - **in-app preferences**: rerun onboarding and adjust things like sound and toast notifications without editing config by hand.
 - **native notifications**: OS-level notifications when an agent needs attention and herdr isn't in focus.
-- **agent API**: `herdr create`, `herdr split`, `herdr send`, so agents and scripts can manage herdr workspaces programmatically.
+- **agent cli wrapper**: `herdr pane ...`, `herdr wait ...`, and similar shell-friendly commands layered on top of the socket API.
 
 ## built with agents
 
@@ -191,6 +204,8 @@ there will be rough edges. if you hit one, [open an issue](https://github.com/og
 
 ## cli
 
+current built-in commands:
+
 ```
 herdr                   launch herdr
 herdr update            download and install the latest version
@@ -199,6 +214,11 @@ herdr --default-config  print default configuration
 herdr --no-session      start without restoring or saving sessions
 herdr --help            show help
 ```
+
+programmatic control today lives in the socket API:
+- [`SOCKET_API.md`](./SOCKET_API.md)
+
+shell-friendly wrapper commands like `herdr pane ...` and `herdr wait ...` are planned on top of that API.
 
 ## building from source
 
@@ -212,7 +232,7 @@ cargo build --release
 ## testing
 
 ```bash
-just test               # unit tests (157 tests)
+just test               # unit tests
 just test-integration   # LLM-based integration tests
 just test-all           # both
 ```

@@ -225,7 +225,8 @@ fn main() -> io::Result<()> {
     init_logging();
 
     let (api_tx, api_rx) = std::sync::mpsc::channel();
-    let _api_server = api::start_server(api_tx)?;
+    let event_hub = api::EventHub::default();
+    let _api_server = api::start_server(api_tx, event_hub.clone())?;
 
     let no_session = std::env::args().any(|a| a == "--no-session");
     let in_tmux = std::env::var("TMUX").is_ok();
@@ -288,7 +289,7 @@ fn main() -> io::Result<()> {
             std::io::stdout().flush()?;
         }
 
-        let mut app = app::App::new(config, no_session, config_diagnostic, api_rx);
+        let mut app = app::App::new(config, no_session, config_diagnostic, api_rx, event_hub);
         let result = app.run(&mut terminal).await;
 
         // Reset modifyOtherKeys if we enabled it
