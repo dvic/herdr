@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs},
     Frame,
 };
 use tui_term::widget::PseudoTerminal;
@@ -1230,36 +1230,23 @@ fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     y += 1;
 
     // Tab bar
-    let tabs: Vec<Span> = SettingsSection::ALL
-        .iter()
-        .map(|s| {
-            let active = *s == app.settings.section;
-            let label = format!(" {} ", s.label());
-            if active {
-                Span::styled(
-                    label,
-                    Style::default()
-                        .fg(p.panel_bg)
-                        .bg(p.accent)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Span::styled(label, Style::default().fg(p.overlay1))
-            }
-        })
-        .collect();
-    let mut tab_line: Vec<Span> = Vec::new();
-    tab_line.push(Span::styled(" ", Style::default()));
-    for (i, tab) in tabs.into_iter().enumerate() {
-        if i > 0 {
-            tab_line.push(Span::styled(" ", Style::default()));
-        }
-        tab_line.push(tab);
-    }
-    frame.render_widget(
-        Paragraph::new(Line::from(tab_line)),
-        Rect::new(inner.x, y, inner.width, 1),
-    );
+    let tabs = Tabs::new(SettingsSection::ALL.iter().map(|s| s.label()))
+        .select(
+            SettingsSection::ALL
+                .iter()
+                .position(|section| *section == app.settings.section)
+                .unwrap_or(0),
+        )
+        .style(Style::default().fg(p.overlay1))
+        .highlight_style(
+            Style::default()
+                .fg(p.panel_bg)
+                .bg(p.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .divider(" ")
+        .padding(" ", " ");
+    frame.render_widget(tabs, Rect::new(inner.x, y, inner.width, 1));
     y += 1;
 
     // Separator
@@ -1325,53 +1312,31 @@ fn render_settings_theme(app: &AppState, frame: &mut Frame, area: Rect) {
     use crate::app::state::THEME_NAMES;
 
     let p = &app.palette;
-    let max_visible = (area.height as usize).saturating_sub(1);
-    let selected = app.settings.selected;
-
-    // Scroll offset
-    let scroll = if selected >= max_visible {
-        selected - max_visible + 1
-    } else {
-        0
-    };
-
-    for (vi, theme_idx) in (scroll..THEME_NAMES.len()).enumerate() {
-        if vi >= max_visible {
-            break;
-        }
-        let name = THEME_NAMES[theme_idx];
-        let is_selected = theme_idx == selected;
-        let is_current = name.to_lowercase().replace([' ', '_'], "-")
-            == app.theme_name.to_lowercase().replace([' ', '_'], "-");
-
-        let prefix = if is_selected { "▸" } else { " " };
-        let marker = if is_current { " ✓" } else { "" };
-
-        let row_y = area.y + vi as u16;
-
-        // Background for selected
-        if is_selected {
-            let buf = frame.buffer_mut();
-            for x in area.x..area.x + area.width {
-                buf[(x, row_y)].set_style(Style::default().bg(p.surface0));
-            }
-        }
-
-        let name_style = if is_selected {
-            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.subtext0)
-        };
-
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!(" {prefix} "), Style::default().fg(p.overlay0)),
-                Span::styled(name, name_style),
+    let items: Vec<ListItem> = THEME_NAMES
+        .iter()
+        .map(|name| {
+            let is_current = name.to_lowercase().replace([' ', '_'], "-")
+                == app.theme_name.to_lowercase().replace([' ', '_'], "-");
+            let marker = if is_current { " ✓" } else { "" };
+            ListItem::new(Line::from(vec![
+                Span::styled(*name, Style::default().fg(p.subtext0)),
                 Span::styled(marker, Style::default().fg(p.green)),
-            ])),
-            Rect::new(area.x, row_y, area.width, 1),
-        );
-    }
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .highlight_style(
+            Style::default()
+                .bg(p.surface0)
+                .fg(p.text)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(" ▸ ")
+        .style(Style::default().fg(p.subtext0));
+
+    let mut state = ListState::default().with_selected(Some(app.settings.selected));
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 /// Reusable toggle widget for boolean settings (sound, toast).
@@ -1384,10 +1349,14 @@ fn render_settings_toggle(
     current_value: bool,
     selected_idx: usize,
 ) {
-    let mut y = area.y;
+    let [desc_area, _, list_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(2),
+    ])
+    .areas::<3>(area);
 
-    // Description — truncate to fit within area
-    let max_desc_len = (area.width as usize).saturating_sub(2);
+    let max_desc_len = (desc_area.width as usize).saturating_sub(2);
     let desc_text = if description.len() > max_desc_len {
         format!(" {}…", &description[..max_desc_len.saturating_sub(2)])
     } else {
@@ -1395,44 +1364,31 @@ fn render_settings_toggle(
     };
     frame.render_widget(
         Paragraph::new(Span::styled(desc_text, Style::default().fg(p.overlay1))),
-        Rect::new(area.x, y, area.width, 1),
+        desc_area,
     );
-    y += 2;
 
-    let options = ["on", "off"];
-    for (i, label) in options.iter().enumerate() {
-        if y >= area.y + area.height {
-            break;
-        }
-        let is_selected = i == selected_idx;
-        let is_active = (i == 0) == current_value;
-
-        let prefix = if is_selected { "▸" } else { " " };
-        let marker = if is_active { " ✓" } else { "" };
-
-        if is_selected {
-            let buf = frame.buffer_mut();
-            for x in area.x..area.x + area.width {
-                buf[(x, y)].set_style(Style::default().bg(p.surface0));
-            }
-        }
-
-        let label_style = if is_selected {
-            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.subtext0)
-        };
-
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!(" {prefix} "), Style::default().fg(p.overlay0)),
-                Span::styled(format!("{title}: {label}"), label_style),
+    let items: Vec<ListItem> = ["on", "off"]
+        .into_iter()
+        .map(|label| {
+            let is_active = (label == "on") == current_value;
+            let marker = if is_active { " ✓" } else { "" };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{title}: {label}"), Style::default().fg(p.subtext0)),
                 Span::styled(marker, Style::default().fg(p.green)),
-            ])),
-            Rect::new(area.x, y, area.width, 1),
-        );
-        y += 1;
-    }
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .highlight_style(
+            Style::default()
+                .bg(p.surface0)
+                .fg(p.text)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(" ▸ ");
+    let mut state = ListState::default().with_selected(Some(selected_idx.min(1)));
+    frame.render_stateful_widget(list, list_area, &mut state);
 }
 
 fn render_context_menu(app: &AppState, frame: &mut Frame) {
@@ -1450,24 +1406,21 @@ fn render_context_menu(app: &AppState, frame: &mut Frame) {
         return;
     };
 
-    let highlight = Style::default()
-        .fg(p.panel_bg)
-        .bg(p.accent)
-        .add_modifier(Modifier::BOLD);
-    let normal = Style::default().fg(p.text).bg(p.panel_bg);
-
-    for (i, item) in CONTEXT_MENU_ITEMS.iter().enumerate() {
-        if i as u16 >= inner.height {
-            break;
-        }
-        let style = if i == menu.selected {
-            highlight
-        } else {
-            normal
-        };
-        let row = Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
-        frame.render_widget(Paragraph::new(format!(" {item}")).style(style), row);
-    }
+    let items: Vec<ListItem> = CONTEXT_MENU_ITEMS
+        .iter()
+        .map(|item| ListItem::new(Line::from(*item)))
+        .collect();
+    let list = List::new(items)
+        .style(Style::default().fg(p.text))
+        .highlight_style(
+            Style::default()
+                .bg(p.accent)
+                .fg(p.panel_bg)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(" ");
+    let mut state = ListState::default().with_selected(Some(menu.selected));
+    frame.render_stateful_widget(list, inner, &mut state);
 }
 
 fn render_update_notification(frame: &mut Frame, area: Rect, version: &str, p: &Palette) {
