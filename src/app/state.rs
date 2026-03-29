@@ -7,6 +7,304 @@ use crate::layout::{PaneInfo, SplitBorder};
 use crate::selection::Selection;
 use crate::workspace::Workspace;
 
+// ---------------------------------------------------------------------------
+// Theme palette — all UI colors in one place, ready for theming
+// ---------------------------------------------------------------------------
+
+/// All colors used by the UI. Derived from a base accent color for now,
+/// but structured so a full theme system can replace it later.
+#[allow(dead_code)] // all fields defined for theming — some used later
+pub struct Palette {
+    /// Primary accent (highlight, active borders).
+    pub accent: Color,
+    /// Subtle surface background for selected/focused items.
+    pub surface0: Color,
+    /// Slightly lighter surface for hover/active states.
+    pub surface1: Color,
+    /// Very dim surface for separators.
+    pub surface_dim: Color,
+    /// Muted text (secondary info, numbers).
+    pub overlay0: Color,
+    /// Slightly brighter overlay text.
+    pub overlay1: Color,
+    /// Main text color — soft white.
+    pub text: Color,
+    /// Subdued text (workspace numbers, dim labels).
+    pub subtext0: Color,
+    /// Branch name / special label color.
+    pub mauve: Color,
+    /// Done / idle states.
+    pub green: Color,
+    /// Busy / running states.
+    pub yellow: Color,
+    /// Needs attention / waiting states.
+    pub red: Color,
+    /// Unseen / done notification accent.
+    pub blue: Color,
+    /// Notification accent / unseen markers.
+    pub teal: Color,
+    /// Interrupted / warning states.
+    pub peach: Color,
+}
+
+impl Palette {
+    /// Catppuccin Mocha — the default.
+    pub fn catppuccin() -> Self {
+        Self {
+            accent: Color::Rgb(137, 180, 250), // blue
+            surface0: Color::Rgb(49, 50, 68),
+            surface1: Color::Rgb(69, 71, 90),
+            surface_dim: Color::Rgb(30, 30, 46),
+            overlay0: Color::Rgb(108, 112, 134),
+            overlay1: Color::Rgb(127, 132, 156),
+            text: Color::Rgb(205, 214, 244),
+            subtext0: Color::Rgb(166, 173, 200),
+            mauve: Color::Rgb(203, 166, 247),
+            green: Color::Rgb(166, 227, 161),
+            yellow: Color::Rgb(249, 226, 175),
+            red: Color::Rgb(243, 139, 168),
+            blue: Color::Rgb(137, 180, 250),
+            teal: Color::Rgb(148, 226, 213),
+            peach: Color::Rgb(250, 179, 135),
+        }
+    }
+
+    /// Tokyo Night — blue-purple aesthetic.
+    pub fn tokyo_night() -> Self {
+        Self {
+            accent: Color::Rgb(122, 162, 247), // blue
+            surface0: Color::Rgb(36, 40, 59),
+            surface1: Color::Rgb(65, 72, 104),
+            surface_dim: Color::Rgb(26, 27, 38),
+            overlay0: Color::Rgb(86, 95, 137),
+            overlay1: Color::Rgb(105, 113, 150),
+            text: Color::Rgb(192, 202, 245),
+            subtext0: Color::Rgb(169, 177, 214),
+            mauve: Color::Rgb(187, 154, 247),
+            green: Color::Rgb(158, 206, 106),
+            yellow: Color::Rgb(224, 175, 104),
+            red: Color::Rgb(247, 118, 142),
+            blue: Color::Rgb(122, 162, 247),
+            teal: Color::Rgb(125, 207, 255),
+            peach: Color::Rgb(255, 158, 100),
+        }
+    }
+
+    /// Dracula — purple/pink/green.
+    pub fn dracula() -> Self {
+        Self {
+            accent: Color::Rgb(189, 147, 249), // purple
+            surface0: Color::Rgb(68, 71, 90),
+            surface1: Color::Rgb(98, 114, 164),
+            surface_dim: Color::Rgb(40, 42, 54),
+            overlay0: Color::Rgb(98, 114, 164),
+            overlay1: Color::Rgb(130, 140, 180),
+            text: Color::Rgb(248, 248, 242),
+            subtext0: Color::Rgb(210, 210, 220),
+            mauve: Color::Rgb(255, 121, 198), // pink
+            green: Color::Rgb(80, 250, 123),
+            yellow: Color::Rgb(241, 250, 140),
+            red: Color::Rgb(255, 85, 85),
+            blue: Color::Rgb(139, 233, 253), // cyan-ish
+            teal: Color::Rgb(139, 233, 253),
+            peach: Color::Rgb(255, 184, 108),
+        }
+    }
+
+    /// Nord — frosty blue palette.
+    pub fn nord() -> Self {
+        Self {
+            accent: Color::Rgb(136, 192, 208), // frost
+            surface0: Color::Rgb(59, 66, 82),
+            surface1: Color::Rgb(67, 76, 94),
+            surface_dim: Color::Rgb(46, 52, 64),
+            overlay0: Color::Rgb(76, 86, 106),
+            overlay1: Color::Rgb(100, 110, 130),
+            text: Color::Rgb(236, 239, 244),
+            subtext0: Color::Rgb(216, 222, 233),
+            mauve: Color::Rgb(180, 142, 173),
+            green: Color::Rgb(163, 190, 140),
+            yellow: Color::Rgb(235, 203, 139),
+            red: Color::Rgb(191, 97, 106),
+            blue: Color::Rgb(129, 161, 193),
+            teal: Color::Rgb(143, 188, 187),
+            peach: Color::Rgb(208, 135, 112),
+        }
+    }
+
+    /// Gruvbox Dark — warm retro palette.
+    pub fn gruvbox() -> Self {
+        Self {
+            accent: Color::Rgb(215, 153, 33), // yellow
+            surface0: Color::Rgb(60, 56, 54),
+            surface1: Color::Rgb(80, 73, 69),
+            surface_dim: Color::Rgb(40, 40, 40),
+            overlay0: Color::Rgb(146, 131, 116),
+            overlay1: Color::Rgb(168, 153, 132),
+            text: Color::Rgb(235, 219, 178),
+            subtext0: Color::Rgb(213, 196, 161),
+            mauve: Color::Rgb(211, 134, 155),
+            green: Color::Rgb(184, 187, 38),
+            yellow: Color::Rgb(250, 189, 47),
+            red: Color::Rgb(251, 73, 52),
+            blue: Color::Rgb(131, 165, 152),
+            teal: Color::Rgb(142, 192, 124),
+            peach: Color::Rgb(254, 128, 25),
+        }
+    }
+
+    /// One Dark — Atom's classic dark theme.
+    pub fn one_dark() -> Self {
+        Self {
+            accent: Color::Rgb(97, 175, 239), // blue
+            surface0: Color::Rgb(44, 49, 58),
+            surface1: Color::Rgb(62, 68, 81),
+            surface_dim: Color::Rgb(40, 44, 52),
+            overlay0: Color::Rgb(92, 99, 112),
+            overlay1: Color::Rgb(115, 122, 135),
+            text: Color::Rgb(171, 178, 191),
+            subtext0: Color::Rgb(150, 156, 168),
+            mauve: Color::Rgb(198, 120, 221),
+            green: Color::Rgb(152, 195, 121),
+            yellow: Color::Rgb(229, 192, 123),
+            red: Color::Rgb(224, 108, 117),
+            blue: Color::Rgb(97, 175, 239),
+            teal: Color::Rgb(86, 182, 194),
+            peach: Color::Rgb(209, 154, 102),
+        }
+    }
+
+    /// Solarized Dark — Ethan Schoonover's classic.
+    pub fn solarized() -> Self {
+        Self {
+            accent: Color::Rgb(38, 139, 210), // blue
+            surface0: Color::Rgb(7, 54, 66),
+            surface1: Color::Rgb(88, 110, 117),
+            surface_dim: Color::Rgb(0, 43, 54),
+            overlay0: Color::Rgb(88, 110, 117),
+            overlay1: Color::Rgb(101, 123, 131),
+            text: Color::Rgb(147, 161, 161),
+            subtext0: Color::Rgb(131, 148, 150),
+            mauve: Color::Rgb(211, 54, 130),
+            green: Color::Rgb(133, 153, 0),
+            yellow: Color::Rgb(181, 137, 0),
+            red: Color::Rgb(220, 50, 47),
+            blue: Color::Rgb(38, 139, 210),
+            teal: Color::Rgb(42, 161, 152),
+            peach: Color::Rgb(203, 75, 22),
+        }
+    }
+
+    /// Kanagawa — inspired by Katsushika Hokusai.
+    pub fn kanagawa() -> Self {
+        Self {
+            accent: Color::Rgb(126, 156, 216), // blue
+            surface0: Color::Rgb(42, 42, 55),
+            surface1: Color::Rgb(54, 54, 70),
+            surface_dim: Color::Rgb(31, 31, 40),
+            overlay0: Color::Rgb(114, 113, 105),
+            overlay1: Color::Rgb(135, 134, 125),
+            text: Color::Rgb(220, 215, 186),
+            subtext0: Color::Rgb(200, 195, 170),
+            mauve: Color::Rgb(149, 127, 184),
+            green: Color::Rgb(118, 148, 106),
+            yellow: Color::Rgb(192, 163, 110),
+            red: Color::Rgb(195, 64, 67),
+            blue: Color::Rgb(126, 156, 216),
+            teal: Color::Rgb(127, 180, 202),
+            peach: Color::Rgb(255, 160, 102),
+        }
+    }
+
+    /// Rosé Pine — muted, elegant.
+    pub fn rose_pine() -> Self {
+        Self {
+            accent: Color::Rgb(196, 167, 231), // iris
+            surface0: Color::Rgb(31, 29, 46),
+            surface1: Color::Rgb(38, 35, 58),
+            surface_dim: Color::Rgb(25, 23, 36),
+            overlay0: Color::Rgb(110, 106, 134),
+            overlay1: Color::Rgb(144, 140, 170),
+            text: Color::Rgb(224, 222, 244),
+            subtext0: Color::Rgb(200, 197, 220),
+            mauve: Color::Rgb(196, 167, 231),  // iris
+            green: Color::Rgb(49, 116, 143),   // pine
+            yellow: Color::Rgb(246, 193, 119), // gold
+            red: Color::Rgb(235, 111, 146),    // love
+            blue: Color::Rgb(49, 116, 143),    // pine
+            teal: Color::Rgb(156, 207, 216),   // foam
+            peach: Color::Rgb(234, 154, 151),  // rose
+        }
+    }
+
+    /// Resolve a theme by name. Returns None for unknown names.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_lowercase().replace([' ', '_'], "-").as_str() {
+            "catppuccin" | "catppuccin-mocha" => Some(Self::catppuccin()),
+            "tokyo-night" | "tokyonight" => Some(Self::tokyo_night()),
+            "dracula" => Some(Self::dracula()),
+            "nord" => Some(Self::nord()),
+            "gruvbox" | "gruvbox-dark" => Some(Self::gruvbox()),
+            "one-dark" | "onedark" => Some(Self::one_dark()),
+            "solarized" | "solarized-dark" => Some(Self::solarized()),
+            "kanagawa" => Some(Self::kanagawa()),
+            "rose-pine" | "rosepine" => Some(Self::rose_pine()),
+            _ => None,
+        }
+    }
+
+    /// Apply custom color overrides on top of this palette.
+    pub fn with_overrides(mut self, custom: &crate::config::CustomThemeColors) -> Self {
+        use crate::config::parse_color;
+        if let Some(c) = &custom.accent {
+            self.accent = parse_color(c);
+        }
+        if let Some(c) = &custom.surface0 {
+            self.surface0 = parse_color(c);
+        }
+        if let Some(c) = &custom.surface1 {
+            self.surface1 = parse_color(c);
+        }
+        if let Some(c) = &custom.surface_dim {
+            self.surface_dim = parse_color(c);
+        }
+        if let Some(c) = &custom.overlay0 {
+            self.overlay0 = parse_color(c);
+        }
+        if let Some(c) = &custom.overlay1 {
+            self.overlay1 = parse_color(c);
+        }
+        if let Some(c) = &custom.text {
+            self.text = parse_color(c);
+        }
+        if let Some(c) = &custom.subtext0 {
+            self.subtext0 = parse_color(c);
+        }
+        if let Some(c) = &custom.mauve {
+            self.mauve = parse_color(c);
+        }
+        if let Some(c) = &custom.green {
+            self.green = parse_color(c);
+        }
+        if let Some(c) = &custom.yellow {
+            self.yellow = parse_color(c);
+        }
+        if let Some(c) = &custom.red {
+            self.red = parse_color(c);
+        }
+        if let Some(c) = &custom.blue {
+            self.blue = parse_color(c);
+        }
+        if let Some(c) = &custom.teal {
+            self.teal = parse_color(c);
+        }
+        if let Some(c) = &custom.peach {
+            self.peach = parse_color(c);
+        }
+        self
+    }
+}
+
 /// Computed view geometry — derived from AppState + terminal size.
 /// Updated before each render, consumed by render and mouse handling.
 pub struct ViewState {
@@ -90,6 +388,10 @@ pub struct AppState {
     pub sound: SoundConfig,
     pub toast_config: ToastConfig,
     pub keybinds: Keybinds,
+    /// Frame counter for spinner animations (wraps around).
+    pub spinner_tick: u32,
+    /// UI color palette — all sidebar/UI colors centralized for theming.
+    pub palette: Palette,
 }
 
 impl AppState {
@@ -188,6 +490,8 @@ impl AppState {
                 toggle_sidebar: (KeyCode::Char('b'), KeyModifiers::empty()),
                 toggle_sidebar_label: "b".into(),
             },
+            spinner_tick: 0,
+            palette: Palette::catppuccin(),
         }
     }
 }

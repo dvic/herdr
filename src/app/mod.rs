@@ -36,6 +36,38 @@ pub struct App {
     toast_deadline: Option<Instant>,
 }
 
+/// Resolve the palette from config: base theme + optional custom overrides.
+fn resolve_palette(config: &crate::config::Config) -> state::Palette {
+    // Start with the named theme (default: catppuccin)
+    let base_name = config.theme.name.as_deref().unwrap_or("catppuccin");
+    let mut palette = state::Palette::from_name(base_name).unwrap_or_else(|| {
+        tracing::warn!(
+            theme = base_name,
+            "unknown theme, falling back to catppuccin"
+        );
+        state::Palette::catppuccin()
+    });
+
+    // Apply custom overrides if present
+    if let Some(custom) = &config.theme.custom {
+        palette = palette.with_overrides(custom);
+    }
+
+    // Legacy: if ui.accent is set and no theme.custom.accent, use it for compat
+    if config.ui.accent != "cyan"
+        && config
+            .theme
+            .custom
+            .as_ref()
+            .and_then(|c| c.accent.as_ref())
+            .is_none()
+    {
+        palette.accent = crate::config::parse_color(&config.ui.accent);
+    }
+
+    palette
+}
+
 impl App {
     pub fn new(
         config: &Config,
@@ -106,6 +138,8 @@ impl App {
             sound: config.ui.sound.clone(),
             toast_config: config.ui.toast.clone(),
             keybinds: config.keybinds(),
+            spinner_tick: 0,
+            palette: resolve_palette(&config),
         };
 
         // Background auto-update (skipped in --no-session / test mode)
@@ -154,6 +188,8 @@ impl App {
                 self.toast_deadline = None;
                 self.state.toast = None;
             }
+
+            self.state.spinner_tick = self.state.spinner_tick.wrapping_add(1);
 
             terminal.draw(|frame| {
                 crate::ui::compute_view(&mut self.state, frame.area());

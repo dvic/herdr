@@ -73,12 +73,24 @@ fn init_logging() {
         .init();
 }
 
-const DEFAULT_CONFIG: &str = r#"# herdr configuration
+const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Place this file at ~/.config/herdr/config.toml
 
 # Show first-run notification setup on startup.
 # Missing also shows onboarding; set false after you've chosen.
 # onboarding = true
+
+[theme]
+# Built-in themes: catppuccin, tokyo-night, dracula, nord, gruvbox,
+#                  one-dark, solarized, kanagawa, rose-pine
+# name = "catppuccin"
+
+# Override individual color tokens on top of the base theme.
+# Accepts: hex (#rrggbb), named colors, or rgb(r,g,b)
+# [theme.custom]
+# accent = "#f5c2e7"
+# red = "#ff6188"
+# green = "#a6e3a1"
 
 [keys]
 # Prefix key to enter navigate mode (default: "ctrl+b")
@@ -126,7 +138,7 @@ const DEFAULT_CONFIG: &str = r#"# herdr configuration
 [advanced]
 # Allow launching herdr from inside a herdr-managed pane.
 # allow_nested = false
-"#;
+"##;
 
 fn should_block_nested(config: &config::Config) -> bool {
     should_block_nested_for_env(config, std::env::var(HERDR_ENV_VAR).ok().as_deref())

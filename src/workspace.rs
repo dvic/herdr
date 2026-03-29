@@ -157,6 +157,7 @@ impl Workspace {
         self.runtimes.get(&self.root_pane).and_then(|rt| rt.cwd())
     }
 
+    /// Agent name summary (e.g. "claude, amp"). Used by collapsed sidebar.
     pub fn agent_summary(&self) -> Option<String> {
         let mut names = Vec::new();
 
@@ -206,6 +207,61 @@ impl Workspace {
             })
             .collect()
     }
+
+    /// Per-pane detail for the agent detail panel, ordered by urgency.
+    pub fn pane_details(&self) -> Vec<PaneDetail> {
+        let mut details: Vec<PaneDetail> = self
+            .layout
+            .pane_ids()
+            .iter()
+            .map(|id| {
+                let pane = self.panes.get(id);
+                let agent = pane.and_then(|p| p.detected_agent);
+                let state = pane.map(|p| p.state).unwrap_or(AgentState::Unknown);
+                let seen = pane.map(|p| p.seen).unwrap_or(true);
+                let label = agent
+                    .map(|a| agent_name(a).to_string())
+                    .unwrap_or_else(|| "shell".to_string());
+                PaneDetail {
+                    label,
+                    agent,
+                    state,
+                    seen,
+                }
+            })
+            .collect();
+        // Sort by urgency: waiting > busy > idle(unseen) > idle > unknown
+        details.sort_by(|a, b| b.urgency().cmp(&a.urgency()));
+        details
+    }
+
+    /// Get the git branch for this workspace's root cwd.
+    pub fn branch(&self) -> Option<String> {
+        self.root_cwd().and_then(|cwd| git_branch(&cwd))
+    }
+}
+
+/// Detail info for a single pane, used by the agent detail panel.
+pub struct PaneDetail {
+    pub label: String,
+    /// The detected agent, if any. Will be used for context extraction.
+    #[allow(dead_code)] // used later for triage line extraction
+    pub agent: Option<Agent>,
+    pub state: AgentState,
+    pub seen: bool,
+}
+
+impl PaneDetail {
+    /// Urgency score for sort ordering (higher = more urgent, shown first).
+    fn urgency(&self) -> u8 {
+        match (self.state, self.seen) {
+            (AgentState::Waiting, _) => 4,
+            (AgentState::Busy, _) => 3,
+            (AgentState::Idle, false) => 2, // unseen/done
+            (AgentState::Idle, true) => 1,
+            (AgentState::Unknown, _) => 0,
+        }
+    }
 }
 
 fn agent_name(agent: Agent) -> &'static str {
@@ -243,6 +299,18 @@ fn derive_label_from_cwd(cwd: &Path) -> String {
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .unwrap_or_else(|| cwd.display().to_string())
+}
+
+/// Read the current git branch name from .git/HEAD.
+/// Returns None if not in a git repo or HEAD is detached.
+pub fn git_branch(cwd: &Path) -> Option<String> {
+    let repo_root = git_repo_root(cwd)?;
+    let head_path = repo_root.join(".git").join("HEAD");
+    let content = std::fs::read_to_string(head_path).ok()?;
+    let trimmed = content.trim();
+    trimmed
+        .strip_prefix("ref: refs/heads/")
+        .map(|s| s.to_string())
 }
 
 fn git_repo_root(start: &Path) -> Option<PathBuf> {

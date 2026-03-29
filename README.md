@@ -154,6 +154,17 @@ print the full default config with:
 herdr --default-config
 ```
 
+### themes
+
+herdr ships with 9 built-in themes: catppuccin (default), tokyo night, dracula, nord, gruvbox, one dark, solarized, kanagawa, and rosé pine.
+
+```toml
+[theme]
+name = "tokyo-night"
+```
+
+you can also override individual color tokens on top of any base theme. see [`CONFIGURATION.md`](./CONFIGURATION.md) for the full token reference.
+
 for all keybindings, onboarding, notification, sound, UI options, and environment variables, see [`CONFIGURATION.md`](./CONFIGURATION.md).
 
 ## session persistence

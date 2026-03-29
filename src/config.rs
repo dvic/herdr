@@ -16,9 +16,50 @@ pub struct ToastConfig {
 #[serde(default)]
 pub struct Config {
     pub onboarding: Option<bool>,
+    pub theme: ThemeConfig,
     pub keys: KeysConfig,
     pub ui: UiConfig,
     pub advanced: AdvancedConfig,
+}
+
+/// Theme configuration: pick a built-in or override individual tokens.
+///
+/// ```toml
+/// [theme]
+/// name = "tokyo-night"  # built-in: catppuccin, tokyo-night, dracula, nord, etc.
+///
+/// [theme.custom]        # override individual tokens on top of the base
+/// accent = "#f5c2e7"
+/// red = "#ff6188"
+/// ```
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ThemeConfig {
+    /// Built-in theme name. Default: "catppuccin".
+    pub name: Option<String>,
+    /// Custom overrides — applied on top of the selected base theme.
+    pub custom: Option<CustomThemeColors>,
+}
+
+/// Per-token color overrides. All fields optional — only set what you want to change.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct CustomThemeColors {
+    pub accent: Option<String>,
+    pub surface0: Option<String>,
+    pub surface1: Option<String>,
+    pub surface_dim: Option<String>,
+    pub overlay0: Option<String>,
+    pub overlay1: Option<String>,
+    pub text: Option<String>,
+    pub subtext0: Option<String>,
+    pub mauve: Option<String>,
+    pub green: Option<String>,
+    pub yellow: Option<String>,
+    pub red: Option<String>,
+    pub blue: Option<String>,
+    pub teal: Option<String>,
+    pub peach: Option<String>,
 }
 
 #[derive(Debug)]
@@ -938,5 +979,40 @@ allow_nested = true
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.advanced.allow_nested);
+    }
+
+    #[test]
+    fn theme_name_parses() {
+        let toml = r#"
+[theme]
+name = "dracula"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.theme.name.as_deref(), Some("dracula"));
+    }
+
+    #[test]
+    fn theme_custom_overrides_parse() {
+        let toml = r##"
+[theme]
+name = "nord"
+
+[theme.custom]
+accent = "#ff79c6"
+red = "rgb(255, 85, 85)"
+"##;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.theme.name.as_deref(), Some("nord"));
+        let custom = config.theme.custom.as_ref().unwrap();
+        assert_eq!(custom.accent.as_deref(), Some("#ff79c6"));
+        assert_eq!(custom.red.as_deref(), Some("rgb(255, 85, 85)"));
+        assert!(custom.green.is_none());
+    }
+
+    #[test]
+    fn theme_defaults_when_missing() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.theme.name.is_none());
+        assert!(config.theme.custom.is_none());
     }
 }

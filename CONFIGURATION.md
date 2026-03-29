@@ -76,6 +76,69 @@ toggle_sidebar = "b"
 | `resize_mode` | `r` | enter or leave resize mode |
 | `toggle_sidebar` | `b` | collapse or expand the sidebar |
 
+## theme
+
+herdr ships with 9 built-in color themes. set one in config:
+
+```toml
+[theme]
+name = "tokyo-night"
+```
+
+### built-in themes
+
+| name | description |
+|------|-------------|
+| `catppuccin` | soft pastel mocha palette (default) |
+| `tokyo-night` | blue-purple aesthetic |
+| `dracula` | purple/pink/green classic |
+| `nord` | frosty scandinavian blues |
+| `gruvbox` | warm retro browns/oranges |
+| `one-dark` | atom's beloved palette |
+| `solarized` | ethan schoonover's classic |
+| `kanagawa` | hokusai-inspired |
+| `rose-pine` | muted, elegant |
+
+theme names are flexible: `tokyo-night`, `tokyonight`, and `tokyo_night` all work.
+
+### custom overrides
+
+override individual color tokens on top of any base theme:
+
+```toml
+[theme]
+name = "dracula"
+
+[theme.custom]
+accent = "#f5c2e7"
+red = "rgb(255, 85, 85)"
+green = "#a6e3a1"
+```
+
+all tokens are optional — only set what you want to change.
+
+### available tokens
+
+| token | used for |
+|-------|----------|
+| `accent` | highlights, active borders, navigation UI |
+| `surface0` | selected item background |
+| `surface1` | hover/active backgrounds |
+| `surface_dim` | active workspace background, separators |
+| `overlay0` | muted text, secondary info |
+| `overlay1` | slightly brighter secondary text |
+| `text` | primary text |
+| `subtext0` | workspace names, dimmed labels |
+| `mauve` | git branch names, special labels |
+| `green` | idle/done states |
+| `yellow` | busy/running states |
+| `red` | waiting/needs attention states |
+| `blue` | unseen notifications |
+| `teal` | done notification accents |
+| `peach` | interrupted/warning states |
+
+tokens accept the same color formats as `accent`: hex (`#rrggbb`), named colors, or `rgb(r,g,b)`.
+
 ## ui
 
 ```toml
