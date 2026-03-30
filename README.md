@@ -7,52 +7,95 @@
 <p align="center">herd your agents.</p>
 
 <p align="center">
-  <a href="https://herdr.dev">herdr.dev</a> · <a href="#install">install</a> · <a href="#usage">usage</a> · <a href="./CONFIGURATION.md">configuration</a> · <a href="./SOCKET_API.md">socket api</a>
+  <a href="https://herdr.dev">herdr.dev</a> · <a href="#install">install</a> · <a href="#usage">usage</a> · <a href="./CONFIGURATION.md">configuration</a> · <a href="./SKILL.md">agent skill</a> · <a href="./SOCKET_API.md">socket api</a>
 </p>
 
 ---
 
-herdr is a terminal workspace manager for AI coding agents. it runs inside your existing terminal: ghostty, alacritty, kitty, wezterm, even inside tmux. a single rust binary that gives you workspaces, tiled panes, intelligent agent state detection, and optional notification alerts.
+herdr is a terminal-native agent multiplexer for coding agents.
 
-it stays terminal-native without forcing a keyboard-only workflow: use prefix keys when you want, click and drag when you don't.
+it runs inside your existing terminal: ghostty, alacritty, kitty, wezterm, even inside tmux. a single rust binary that gives you workspaces, tiled panes, automatic agent detection, and notification alerts without asking you to leave the terminal for a separate gui window, electron wrapper, or web dashboard.
 
-you keep your terminal. herdr keeps track of your agents.
+it is also becoming a shared control surface. you manage agents in herdr, and increasingly those agents can interact with herdr too through its local socket api, cli commands, and the example agent skill in this repo.
 
 <p align="center">
   <img src="assets/screenshot.png" alt="herdr screenshot" width="900" />
 </p>
 
-## philosophy
+## what herdr is
 
-every tool in this space is building more. desktop apps, electron wrappers, web dashboards, all trying to replace your terminal with their own environment.
+most tools in this space try to replace your environment.
 
-herdr takes the opposite approach. it's a tool that lives where you already work. it sits alongside tmux, inside your terminal emulator, part of your existing workflow. it does one thing well: lets you run multiple coding agents in parallel and know when they need you.
+herdr takes the opposite approach. it lives where cli agents already live, keeps mouse and keyboard both first-class, and adds the missing layer: awareness and coordination for running multiple agents in parallel.
 
-the terminal is already a great environment for coding agents. what's been missing is awareness: seeing at a glance which agent is idle, which is working, and which needs your input. herdr adds that layer.
+that means two things:
 
-herdr also keeps workspace creation lightweight. a workspace is a terminal context, not a preconfigured project artifact. create one and it opens immediately; herdr labels it from your current repo or folder. you can rename it later, but that's an override, not a prerequisite.
+- **for you:** one terminal-native place to supervise multiple agents, jump between contexts, and notice when something needs attention.
+- **for your agents:** an automation surface they can increasingly use themselves to create panes, spawn other agents, run helpers, read output, and wait on state.
 
-it also treats mouse support as a first-class interaction model, not an afterthought. click the sidebar to switch workspaces, drag pane borders to resize, scroll panes, and use the keyboard whenever it's faster.
+## workspace model
 
-## how it works
+herdr is opinionated about workspaces.
 
-herdr embeds real terminal emulators using PTY and vt100 parsing. each pane is a full terminal: your shell, your agent, your tools, exactly as they'd run anywhere else.
+it does **not** start by asking you to create an empty named project or pick a folder in a setup flow. you create a workspace, and it opens immediately as a new terminal context.
 
-the sidebar shows your workspaces. each workspace can have multiple tiled panes. the agent detection system reads terminal output in real time and determines what state each agent is in:
+from there, the workspace identity comes from its **root pane**:
 
-- **●** red: agent is waiting for your input
-- **●** yellow: agent is working
-- **●** blue: agent finished (you haven't looked yet)
-- **○** green: agent is idle, you've seen it
+- the first pane in a workspace is the root pane
+- it starts as the top-left anchor and owns the workspace identity
+- the workspace label defaults to the root pane's git repo name
+- if there is no git repo, it falls back to the root pane's current folder name
+- manual rename is supported, but it is an override, not the primary model
 
-when an agent finishes work in a background workspace, its dot turns blue. you see it at a glance and switch over. if you want more interruption, herdr can also play sounds or show top-right toast alerts for background events.
+this keeps workspaces lightweight. they are project contexts first, labels second.
+
+## awareness and notifications
+
+the sidebar is split into two layers:
+
+- **top:** workspaces, each with one aggregate state dot
+- **bottom:** agents inside the selected or active workspace
+
+herdr automatically detects running agents by looking at the foreground process and reading terminal output. the top section compresses each workspace into one prioritized signal so you can scan the whole workspace list quickly; the bottom section shows which specific agent is causing it.
+
+workspace and agent states map to:
+
+- **● red** — blocked: agent needs input or approval
+- **● blue** — done: work finished and you have not looked at it yet
+- **● yellow** — working
+- **○ green** — idle: done, seen, and calm
+- **· dim** — unknown / plain shell
+
+workspace rollups prefer the most urgent thing happening in that workspace: blocked first, then unseen finished work, then working, then idle.
+
+if you want more interruption than ambient sidebar awareness, herdr can also play sounds or show top-right toast notifications for background events.
+
+## agents can use herdr too
+
+herdr is not just a passive manager for humans watching agents. it gives agents two clean integration paths:
+
+- [`SKILL.md`](./SKILL.md) — the reusable agent skill. use this if you want an agent inside herdr to learn the workflow quickly through the existing cli surface.
+- [`SOCKET_API.md`](./SOCKET_API.md) — the direct integration doc. use this if you want the low-level socket protocol, event subscriptions, or the cli wrapper reference that sits on top of it.
+
+those two paths meet at the same control surface. the built-in `herdr workspace ...`, `herdr pane ...`, and `herdr wait ...` commands all talk to the same local socket api.
+
+that means agents running inside herdr can do useful orchestration work themselves:
+
+- create new workspaces for parallel tasks
+- split panes for servers, logs, tests, or scratch work
+- spawn other agents in sibling panes
+- read pane output or wait for output matches
+- send text and keys into other panes
+- wait for another agent to finish before continuing
+
+in that sense, herdr is for you **and** for your agents.
 
 ## supported agents
 
 herdr detects agent state by identifying the foreground process and reading terminal output patterns. the following agents have been tested:
 
-| agent | idle | busy | needs attention |
-|-------|------|------|-----------------|
+| agent | idle / done | working | blocked |
+|-------|-------------|---------|---------|
 | [pi](https://pi.dev) | ✓ | ✓ | partial |
 | [claude code](https://docs.anthropic.com/en/docs/claude-code) | ✓ | ✓ | ✓ |
 | [codex](https://github.com/openai/codex) | ✓ | ✓ | ✓ |
@@ -60,7 +103,7 @@ herdr detects agent state by identifying the foreground process and reading term
 | [amp](https://ampcode.com) | ✓ | ✓ | partial |
 | [opencode](https://github.com/anomalyco/opencode) | ✓ | ✓ | ✓ |
 
-detection heuristics also exist for these agents but haven't been fully tested yet. if you use them and run into issues, please [open an issue](https://github.com/ogulcancelik/herdr/issues):
+detection heuristics also exist for these agents but have not been fully tested yet. if you use them and run into issues, please [open an issue](https://github.com/ogulcancelik/herdr/issues):
 
 - [gemini cli](https://github.com/google-gemini/gemini-cli)
 - [cursor agent](https://cursor.com/cli)
@@ -68,7 +111,7 @@ detection heuristics also exist for these agents but haven't been fully tested y
 - [kimi](https://kimi.ai)
 - [github copilot cli](https://cli.github.com)
 
-for any other CLI agent, herdr still works as a workspace manager. you still get workspaces, panes, and tiling. a hook system for custom agent state reporting is coming soon.
+for any other cli agent, herdr still works as a terminal-native multiplexer. you still get workspaces, panes, tiling, and notifications. richer direct agent-side reporting on top of the socket/event layer is still evolving.
 
 ## install
 
@@ -82,7 +125,7 @@ requirements: linux or macos.
 
 ### update
 
-herdr checks for updates automatically in the background. when a new version is ready, you'll see a notification in the UI. just restart to apply. you can also update manually:
+herdr checks for updates automatically in the background. when a new version is ready, you'll see a notification in the ui. just restart to apply. you can also update manually:
 
 ```bash
 herdr update
@@ -98,7 +141,7 @@ herdr
 
 on first run, herdr opens a short onboarding flow so you can choose your notification style. after that, if a session is restored you'll land in terminal mode; otherwise you'll start in **navigate mode**.
 
-press `n` to create your first workspace. it opens immediately as a new terminal context, using an automatic label based on your current repo or folder.
+press `n` to create your first workspace. it opens immediately as a new terminal context in your current project context, and herdr labels it automatically from the root pane's repo or folder.
 
 press `ctrl+b` (the prefix key) to switch back to navigate mode. from there you can manage workspaces and panes.
 
@@ -117,6 +160,15 @@ common defaults:
 - `b` toggle sidebar
 
 full keybinding and config reference: [`CONFIGURATION.md`](./CONFIGURATION.md)
+
+### sidebar
+
+the sidebar is your triage surface.
+
+- the top section tells you which workspace needs attention
+- the bottom section tells you which agent inside that workspace is causing it
+
+this is the core loop of herdr: scan the workspace list, drop into the right context, then act.
 
 ### resize mode
 
@@ -165,7 +217,7 @@ name = "tokyo-night"
 
 you can also override individual color tokens on top of any base theme. see [`CONFIGURATION.md`](./CONFIGURATION.md) for the full token reference.
 
-for all keybindings, onboarding, notification, sound, UI options, and environment variables, see [`CONFIGURATION.md`](./CONFIGURATION.md).
+for all keybindings, onboarding, notification, sound, ui options, and environment variables, see [`CONFIGURATION.md`](./CONFIGURATION.md).
 
 ## session persistence
 
@@ -175,80 +227,48 @@ use `--no-session` to start fresh.
 
 ## how agent detection works
 
-herdr doesn't require hooks or agent-side configuration. detection works by:
+herdr does not require hooks or agent-side configuration for its built-in detection. it works by:
 
-1. identifying the foreground process of each pane's PTY (via `/proc` on linux, `proc_pidinfo` on macos)
+1. identifying the foreground process of each pane's pty (via `/proc` on linux, `proc_pidinfo` on macos)
 2. matching the process name against known agents
 3. reading terminal screen content and applying per-agent heuristics to determine state
 
 this means detection works with any supported agent, installed any way, with zero setup. if it runs in a terminal, herdr can see it.
 
-the heuristics are pattern-matched against each agent's actual terminal output: prompt boxes, spinners, "waiting for input" messages, tool execution indicators. detection runs on a separate async task per pane, polled every 300-500ms, decoupled from terminal rendering.
+the heuristics are pattern-matched against each agent's actual terminal output: prompt boxes, spinners, waiting-for-input messages, tool execution indicators. detection runs on a separate async task per pane, polled every 300-500ms, decoupled from terminal rendering.
 
-## socket api
+## api and automation
 
-herdr now has a local unix socket API for scripts, tools, and coding agents.
+for direct integration details, use the docs instead of reverse-engineering the README:
 
-you can:
-- create, focus, rename, and close workspaces
-- list, inspect, read, split, and close panes
-- send text / keys into panes
-- wait for output matches
-- subscribe to lifecycle, agent, and output-match events over a single long-lived connection
+- [`SKILL.md`](./SKILL.md) — reusable agent skill for agents already running inside herdr
+- [`SOCKET_API.md`](./SOCKET_API.md) — canonical socket protocol + cli wrapper reference
 
-see [`SOCKET_API.md`](./SOCKET_API.md) for request shapes, examples, and subscription behavior.
+`SOCKET_API.md` now covers transport, request/response envelopes, workspace and pane methods, subscription behavior, and the `herdr workspace`, `herdr pane`, and `herdr wait` commands that wrap the same socket surface.
 
 ## what's coming
 
-- **notification hooks**: richer agent/script-side state reporting on top of the socket foundation, so unsupported tools can report status directly to herdr.
+- **richer agent-side hooks**: better ways for unsupported tools and custom workflows to report state directly into herdr.
+- **deeper orchestration helpers**: more event-driven and shell-friendly wrappers on top of the socket foundation.
 - **in-app preferences**: rerun onboarding and adjust things like sound and toast notifications without editing config by hand.
-- **native notifications**: OS-level notifications when an agent needs attention and herdr isn't in focus.
-- **expanded cli wrapper**: more shell-friendly commands on top of the socket API, especially broader workspace/pane management and streaming event wrappers.
+- **native notifications**: os-level notifications when an agent needs attention and herdr is not in focus.
 
 ## built with agents
 
-i had never written rust before starting this project. herdr was built almost entirely through AI coding agents, the same ones it's designed to manage. i supervised the architecture and specs, agents wrote the code.
+i had never written rust before starting this project. herdr was built almost entirely through ai coding agents, the same ones it is designed to multiplex. i supervised the architecture and specs; agents wrote the code.
 
-this is a proof of concept in more ways than one. it's a functional tool, but it's also a statement about what's possible right now. if you can build a terminal multiplexer in a language you don't know, by directing the same agents the tool is built for, that says something about where we are.
+this is a proof of concept in more ways than one. it is a functional tool, but it is also a statement about what is possible right now. if you can build a terminal-native agent multiplexer in a language you do not know, by directing the same agents the tool is built for, that says something about where we are.
 
 there will be rough edges. if you hit one, [open an issue](https://github.com/ogulcancelik/herdr/issues). that's why it's open source.
 
-## cli
+## cli wrappers
 
-built-in commands:
-
-```text
-herdr                                   launch herdr
-herdr update                            download and install the latest version
-herdr workspace list                    list workspaces
-herdr workspace create ...              create a workspace
-herdr workspace get <workspace>         inspect one workspace
-herdr workspace focus <workspace>       focus a workspace
-herdr workspace rename <workspace> ...  rename a workspace
-herdr workspace close <workspace>       close a workspace
-herdr pane list ...                     list panes
-herdr pane get <pane>                   inspect one pane
-herdr pane read <pane> ...              read pane output
-herdr pane split <pane> ...             split a pane
-herdr pane close <pane>                 close a pane
-herdr pane send-text <pane> <text>      send text without submitting
-herdr pane send-keys <pane> <keys...>   send keypresses like Enter
-herdr pane run <pane> <command>         send text and press Enter
-herdr wait output <pane> ...            block until output matches
-herdr wait agent-state <pane> ...       block until pane reaches a state
-herdr --version                         print version
-herdr --default-config                  print default configuration
-herdr --no-session                      start without restoring or saving sessions
-herdr --help                            show help
-```
+herdr's workspace, pane, and wait commands are documented in [`SOCKET_API.md`](./SOCKET_API.md) together with the socket methods they wrap.
 
 workspace ids are compact public ids like `1`, `2`, `3`.
 pane ids are compact public ids like `1-1`, `1-2`, `2-1`.
 
 they are positional within the current live session, so numbering compacts when workspaces or panes are closed.
-
-these commands are thin wrappers over the socket API:
-- [`SOCKET_API.md`](./SOCKET_API.md)
 
 ## building from source
 

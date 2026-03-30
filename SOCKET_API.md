@@ -1,18 +1,29 @@
 # herdr socket api
 
-herdr exposes a local unix socket API for scripts, tools, and coding agents that want to control a running herdr instance or subscribe to pane/workspace events.
+herdr exposes a local unix socket api for scripts, tools, and coding agents that want to control a running herdr instance or subscribe to events.
 
-this is the low-level integration surface.
-a CLI wrapper on top of it is planned, but the socket API is the foundation.
+if you are teaching an agent that is already running inside herdr, start with [`SKILL.md`](./SKILL.md). use this document when you want the direct protocol, or when you want the cli wrapper reference for the commands that sit on top of it.
+
+## choose your integration layer
+
+there are three practical ways to integrate with herdr:
+
+- **agent skill** — [`SKILL.md`](./SKILL.md). best when an agent inside herdr just needs to learn the workflow quickly.
+- **cli wrappers** — `herdr workspace ...`, `herdr pane ...`, `herdr wait ...`. best for shell scripts and simple orchestration.
+- **raw socket api** — best when you want direct request/response control or long-lived event subscriptions.
+
+these layers are intentionally stacked on top of the same control surface.
+
+important difference: `pane.run` and `wait agent-state` are **cli conveniences**, not raw socket methods.
 
 ## transport
 
 - transport: unix domain socket
-- encoding: newline-delimited JSON
-- request/response: one JSON request per line, one JSON response per line
-- subscriptions: send `events.subscribe`, receive an ack, then keep the same connection open for pushed events
+- encoding: newline-delimited json
+- request/response: send one json request per line, read one json response per line
+- subscriptions: send `events.subscribe`, receive an ack, then keep the same connection open and continue reading pushed events
 
-socket path resolution:
+socket path resolution order:
 
 1. `HERDR_SOCKET_PATH`
 2. `$XDG_RUNTIME_DIR/herdr.sock`
@@ -20,9 +31,9 @@ socket path resolution:
 4. `$HOME/.config/herdr/herdr.sock`
 5. `/tmp/herdr.sock`
 
-## request shape
+## request and response envelopes
 
-all requests use this envelope:
+all socket requests use this envelope:
 
 ```json
 {
@@ -32,7 +43,7 @@ all requests use this envelope:
 }
 ```
 
-success responses:
+successful responses look like:
 
 ```json
 {
@@ -44,7 +55,7 @@ success responses:
 }
 ```
 
-error responses:
+errors look like:
 
 ```json
 {
@@ -56,7 +67,7 @@ error responses:
 }
 ```
 
-## ids
+## ids and numbering
 
 workspace ids look like:
 
@@ -70,51 +81,127 @@ pane ids look like:
 - `2-1`
 
 that means:
+
 - first number = current workspace number
 - second number = current pane number within that workspace
 
-these are compact public ids for the current live session. if a workspace or pane is closed, numbering compacts.
+these are compact public ids for the current live session. they are **not durable database ids**. if a workspace or pane closes, higher numbers compact down.
 
-## core request methods
+## core objects
 
-currently useful methods include:
-
-### basic
-- `ping`
-
-### workspace
-- `workspace.list`
-- `workspace.get`
-- `workspace.create`
-- `workspace.focus`
-- `workspace.rename`
-- `workspace.close`
-
-### pane
-- `pane.list`
-- `pane.get`
-- `pane.read`
-- `pane.send_text`
-- `pane.send_keys`
-- `pane.split`
-- `pane.close`
-
-### waits / events
-- `pane.wait_for_output`
-- `events.subscribe`
-
-## example: create a workspace
+`workspace_info` responses contain objects like:
 
 ```json
 {
-  "id": "req_create",
-  "method": "workspace.create",
-  "params": {
-    "cwd": "/home/can/Projects/herdr",
-    "focus": true
-  }
+  "workspace_id": "1",
+  "number": 1,
+  "label": "herdr",
+  "focused": true,
+  "pane_count": 1,
+  "agent_state": "unknown"
 }
 ```
+
+`pane_info` responses contain objects like:
+
+```json
+{
+  "pane_id": "1-1",
+  "workspace_id": "1",
+  "focused": true,
+  "cwd": "/home/can/Projects/herdr",
+  "agent": "pi",
+  "agent_state": "working",
+  "revision": 0
+}
+```
+
+`pane_read` responses contain objects like:
+
+```json
+{
+  "pane_id": "1-1",
+  "workspace_id": "1",
+  "source": "recent",
+  "text": "...",
+  "revision": 0,
+  "truncated": false
+}
+```
+
+agent states are:
+
+- `idle`
+- `working`
+- `blocked`
+- `unknown`
+
+## methods at a glance
+
+| method | purpose | success result type |
+|---|---|---|
+| `ping` | health check / version | `pong` |
+| `workspace.list` | list workspaces | `workspace_list` |
+| `workspace.get` | inspect one workspace | `workspace_info` |
+| `workspace.create` | create a workspace | `workspace_info` |
+| `workspace.focus` | focus a workspace | `workspace_info` |
+| `workspace.rename` | rename a workspace | `workspace_info` |
+| `workspace.close` | close a workspace | `ok` |
+| `pane.list` | list panes, optionally filtered by workspace | `pane_list` |
+| `pane.get` | inspect one pane | `pane_info` |
+| `pane.read` | read pane output | `pane_read` |
+| `pane.split` | split a pane and create a sibling pane | `pane_info` |
+| `pane.send_text` | send literal text without Enter | `ok` |
+| `pane.send_keys` | send keypresses like `Enter` | `ok` |
+| `pane.close` | close a pane | `ok` |
+| `pane.wait_for_output` | one-shot blocking wait for text | `output_matched` |
+| `events.subscribe` | start a long-lived subscription stream | `subscription_started` ack |
+
+## workspace methods
+
+### `workspace.list`
+
+request:
+
+```json
+{
+  "id": "req_list",
+  "method": "workspace.list",
+  "params": {}
+}
+```
+
+returns `workspace_list` with zero or more workspace objects.
+
+### `workspace.get`
+
+params:
+
+```json
+{
+  "workspace_id": "1"
+}
+```
+
+returns `workspace_info` for one workspace.
+
+### `workspace.create`
+
+params:
+
+```json
+{
+  "cwd": "/home/can/Projects/herdr",
+  "focus": true
+}
+```
+
+notes:
+
+- `cwd` is optional
+- if `cwd` is omitted, herdr uses its current working directory and falls back to `/` if needed
+- `focus` is optional in raw socket requests and defaults to `false`
+- the cli wrapper is more ergonomic here: `herdr workspace create` focuses by default unless you pass `--no-focus`
 
 example response:
 
@@ -135,78 +222,252 @@ example response:
 }
 ```
 
-## example: read pane output
+### `workspace.focus`
+
+params:
+
+```json
+{
+  "workspace_id": "1"
+}
+```
+
+returns the focused workspace as `workspace_info`.
+
+### `workspace.rename`
+
+params:
+
+```json
+{
+  "workspace_id": "1",
+  "label": "api"
+}
+```
+
+returns updated `workspace_info`.
+
+### `workspace.close`
+
+params:
+
+```json
+{
+  "workspace_id": "1"
+}
+```
+
+returns:
+
+```json
+{
+  "id": "req_close",
+  "result": {
+    "type": "ok"
+  }
+}
+```
+
+## pane methods
+
+### `pane.list`
+
+request with no filter:
+
+```json
+{
+  "id": "req_panes",
+  "method": "pane.list",
+  "params": {}
+}
+```
+
+request filtered to one workspace:
+
+```json
+{
+  "id": "req_panes_ws",
+  "method": "pane.list",
+  "params": {
+    "workspace_id": "1"
+  }
+}
+```
+
+returns `pane_list`.
+
+### `pane.get`
+
+params:
+
+```json
+{
+  "pane_id": "1-1"
+}
+```
+
+returns `pane_info`.
+
+### `pane.read`
+
+params:
+
+```json
+{
+  "pane_id": "1-1",
+  "source": "recent",
+  "lines": 80,
+  "strip_ansi": true
+}
+```
+
+notes:
+
+- `source` is required and must be `visible` or `recent`
+- `lines` is optional
+- current implementation defaults to `80` lines when `lines` is omitted and caps reads at `1000`
+- `strip_ansi` defaults to `true`
+
+`source` meanings:
+
+- `visible` — current viewport
+- `recent` — recent scrollback text
+
+example response:
 
 ```json
 {
   "id": "req_read",
-  "method": "pane.read",
-  "params": {
-    "pane_id": "1-1",
-    "source": "recent",
-    "lines": 80
+  "result": {
+    "type": "pane_read",
+    "read": {
+      "pane_id": "1-1",
+      "workspace_id": "1",
+      "source": "recent",
+      "text": "...",
+      "revision": 0,
+      "truncated": false
+    }
   }
 }
 ```
 
-`source` can be:
-- `visible`
-- `recent`
+### `pane.split`
 
-## example: send text and press enter
-
-low-level input is intentionally explicit:
+params:
 
 ```json
 {
-  "id": "req_send_text",
-  "method": "pane.send_text",
-  "params": {
-    "pane_id": "1-1",
-    "text": "bun run dev"
-  }
+  "target_pane_id": "1-1",
+  "direction": "right",
+  "focus": true
 }
 ```
 
-then:
+notes:
+
+- `direction` must be `right` or `down`
+- `cwd` is optional
+- `focus` is optional in raw socket requests and defaults to `false`
+- the cli wrapper is more ergonomic here too: `herdr pane split ...` focuses by default unless you pass `--no-focus`
+
+returns `pane_info` for the new pane.
+
+### `pane.send_text`
+
+params:
 
 ```json
 {
-  "id": "req_send_keys",
-  "method": "pane.send_keys",
-  "params": {
-    "pane_id": "1-1",
-    "keys": ["Enter"]
-  }
+  "pane_id": "1-1",
+  "text": "bun run dev"
 }
 ```
 
-this is kept separate on purpose. sending text is not always the same thing as submitting it.
+this sends literal text only. it does **not** press Enter.
 
-a future CLI wrapper will likely offer a more ergonomic `pane run` style command on top of this.
+### `pane.send_keys`
 
-## example: one-shot wait for output
+params:
+
+```json
+{
+  "pane_id": "1-1",
+  "keys": ["Enter"]
+}
+```
+
+use this after `pane.send_text` when you want to submit a command.
+
+### `pane.close`
+
+params:
+
+```json
+{
+  "pane_id": "1-2"
+}
+```
+
+returns `ok`.
+
+## waits
+
+### `pane.wait_for_output`
+
+this is the direct socket-side one-shot blocking wait.
+
+params:
+
+```json
+{
+  "pane_id": "1-1",
+  "source": "recent",
+  "lines": 200,
+  "match": { "type": "substring", "value": "ready" },
+  "timeout_ms": 30000,
+  "strip_ansi": true
+}
+```
+
+matcher forms:
+
+```json
+{ "type": "substring", "value": "ready" }
+```
+
+```json
+{ "type": "regex", "value": "server.*ready" }
+```
+
+notes:
+
+- `source` must be `visible` or `recent`
+- `lines` is optional
+- `timeout_ms` is optional
+- `strip_ansi` defaults to `true`
+- on success you get `output_matched`
+- on timeout you get an error response with code `timeout`
+
+example success response:
 
 ```json
 {
   "id": "req_wait",
-  "method": "pane.wait_for_output",
-  "params": {
+  "result": {
+    "type": "output_matched",
     "pane_id": "1-1",
-    "source": "recent",
-    "lines": 200,
-    "match": { "type": "substring", "value": "ready" },
-    "timeout_ms": 30000
+    "revision": 0,
+    "matched_line": "server ready",
+    "read": {
+      "pane_id": "1-1",
+      "workspace_id": "1",
+      "source": "recent",
+      "text": "...server ready...",
+      "revision": 0,
+      "truncated": false
+    }
   }
-}
-```
-
-regex matching is also supported:
-
-```json
-{
-  "type": "regex",
-  "value": "server.*ready"
 }
 ```
 
@@ -214,7 +475,7 @@ regex matching is also supported:
 
 `events.subscribe` is the long-lived pubsub entrypoint.
 
-you send a subscribe request once, get an ack on the same connection, and then keep reading newline-delimited JSON events from that same socket.
+you send a subscribe request once, get an ack on the same connection, and then keep reading newline-delimited json events from that same socket.
 
 ### subscription ack
 
@@ -227,9 +488,10 @@ you send a subscribe request once, get an ack on the same connection, and then k
 }
 ```
 
-## supported subscriptions
+### supported subscriptions
 
-### lifecycle / base events
+base lifecycle subscriptions:
+
 - `workspace.created`
 - `workspace.closed`
 - `workspace.focused`
@@ -238,12 +500,28 @@ you send a subscribe request once, get an ack on the same connection, and then k
 - `pane.focused`
 - `pane.exited`
 - `pane.agent_detected`
+
+parameterized subscriptions:
+
+- `pane.output_matched`
 - `pane.agent_state_changed`
 
-### parameterized event
-- `pane.output_matched`
+### event naming rule
 
-## example: subscribe to lifecycle events
+this part matters because the pushed event names are **not all shaped the same**.
+
+- when you subscribe to a **base lifecycle event**, the pushed `event` value uses snake_case with underscores:
+  - subscribe with `workspace.created`
+  - receive `workspace_created`
+- when you subscribe to a **parameterized subscription**, the pushed `event` value keeps the dotted name:
+  - subscribe with `pane.output_matched`
+  - receive `pane.output_matched`
+
+examples below show both forms.
+
+### example: subscribe to lifecycle events
+
+request:
 
 ```json
 {
@@ -281,7 +559,9 @@ example pushed event:
 }
 ```
 
-## example: subscribe to output matches and agent state changes
+### example: subscribe to output matches and agent state changes
+
+request:
 
 ```json
 {
@@ -305,6 +585,11 @@ example pushed event:
   }
 }
 ```
+
+notes:
+
+- `pane.output_matched` supports `source`, optional `lines`, matcher config, and optional `strip_ansi`
+- `pane.agent_state_changed` accepts an optional `state` filter; if omitted, any state transition for that pane can match
 
 example pushed `pane.output_matched` event:
 
@@ -340,37 +625,82 @@ example pushed `pane.agent_state_changed` event:
 }
 ```
 
-## behavior notes
+## cli wrappers
 
-- `pane.output_matched` emits when a subscription transitions into a matching state. it does not repeatedly spam the same visible match on every poll.
+these commands talk to the same local socket surface and are usually the easiest starting point for shell scripts and coding agents.
+
+### command groups
+
+workspace commands:
+
+```text
+herdr workspace list
+herdr workspace create [--cwd PATH] [--no-focus]
+herdr workspace get <workspace_id>
+herdr workspace focus <workspace_id>
+herdr workspace rename <workspace_id> <label>
+herdr workspace close <workspace_id>
+```
+
+pane commands:
+
+```text
+herdr pane list [--workspace <workspace_id>]
+herdr pane get <pane_id>
+herdr pane read <pane_id> [--source visible|recent] [--lines N] [--raw]
+herdr pane split <pane_id> --direction right|down [--cwd PATH] [--no-focus]
+herdr pane close <pane_id>
+herdr pane send-text <pane_id> <text>
+herdr pane send-keys <pane_id> <key> [key ...]
+herdr pane run <pane_id> <command>
+```
+
+wait commands:
+
+```text
+herdr wait output <pane_id> --match <text> [--source visible|recent] [--lines N] [--timeout MS] [--regex] [--raw]
+herdr wait agent-state <pane_id> --state <idle|working|blocked|unknown> [--timeout MS]
+```
+
+### cli behavior notes
+
+- `workspace create` focuses by default; pass `--no-focus` to keep focus where it is
+- `pane split` focuses the new pane by default; pass `--no-focus` to keep focus on the original pane
+- `pane read` prints **text**, not json
+- `pane send-text`, `pane send-keys`, and `pane run` print nothing on success
+- list/get/create/split/wait commands print json on success
+- `pane run` is a convenience wrapper for `pane send-text` + `pane send-keys Enter`
+- `wait agent-state` is a cli convenience built on top of event subscriptions
+- `--raw` disables ansi stripping for `pane read` and `wait output`
+
+### cli examples
+
+create a workspace, split a pane, run a server, and wait for readiness:
+
+```bash
+herdr workspace create --cwd /path/to/project
+herdr pane split 1-1 --direction right --no-focus
+herdr pane run 1-2 "npm run dev"
+herdr wait output 1-2 --match "ready" --timeout 30000
+```
+
+wait for another agent to finish:
+
+```bash
+herdr wait agent-state 1-1 --state idle --timeout 60000
+```
+
+inspect another pane's output:
+
+```bash
+herdr pane read 1-1 --source recent --lines 80
+```
+
+## behavior notes and gotchas
+
+- `pane.send_text` sends literal text only. if you want to execute a command, follow it with `pane.send_keys` and `Enter`, or use cli `pane run`.
+- `pane.read` and `pane.wait_for_output` strip ansi by default.
+- `pane.output_matched` subscriptions fire on transitions into a matching state; they do not repeatedly spam the same still-visible match on every poll.
 - closing the socket connection ends the subscription.
-- there is no separate transport for events.
+- there is no separate event transport.
 - the same herdr process can serve regular request/response calls and long-lived subscription connections at the same time.
-
-## intended layering
-
-recommended architecture:
-- socket api = foundational integration protocol
-- `herdr ...` commands = ergonomic wrapper for humans and coding agents
-
-current wrapper commands include:
-- `herdr workspace list`
-- `herdr workspace create ...`
-- `herdr workspace get ...`
-- `herdr workspace focus ...`
-- `herdr workspace rename ...`
-- `herdr workspace close ...`
-- `herdr pane list ...`
-- `herdr pane get ...`
-- `herdr pane read ...`
-- `herdr pane split ...`
-- `herdr pane close ...`
-- `herdr pane send-text ...`
-- `herdr pane send-keys ...`
-- `herdr pane run ...`
-- `herdr wait output ...`
-- `herdr wait agent-state ...`
-
-those commands sit on top of this socket surface rather than replacing it.
-
-for convenience, the CLI accepts pane ids in either raw socket form (`1-1`) or short human form (`1-1`).
