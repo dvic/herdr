@@ -91,7 +91,6 @@ fn stdin_read_ready<R: AsRawFd>(_reader: &R, _timeout_ms: i32) -> Option<bool> {
         let fd = _reader.as_raw_fd();
         return poll_read_ready(fd, _timeout_ms);
     }
-
 }
 
 #[cfg(not(unix))]
@@ -179,10 +178,14 @@ fn complete_escape_sequence_len(buffer: &[u8]) -> Option<usize> {
         if buffer.starts_with(b"\x1b[<") {
             return find_csi_final(buffer, b"Mm");
         }
-        return find_csi_final(buffer, b"@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~");
+        return find_csi_final(
+            buffer,
+            b"@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~",
+        );
     }
 
-    if buffer.starts_with(b"\x1b]") || buffer.starts_with(b"\x1bP") || buffer.starts_with(b"\x1b_") {
+    if buffer.starts_with(b"\x1b]") || buffer.starts_with(b"\x1bP") || buffer.starts_with(b"\x1b_")
+    {
         return find_subsequence(buffer, b"\x1b\\").map(|idx| idx + 2);
     }
 
@@ -203,7 +206,9 @@ fn find_csi_final(buffer: &[u8], finals: &[u8]) -> Option<usize> {
 }
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn parse_sgr_mouse(sequence: &str) -> Option<MouseEvent> {
@@ -351,7 +356,8 @@ mod tests {
 
     #[test]
     fn parses_kitty_shift_letter_release() {
-        let (RawInputEvent::Key(key), consumed) = extract_one_event(b"\x1b[108:76;2:3u").unwrap() else {
+        let (RawInputEvent::Key(key), consumed) = extract_one_event(b"\x1b[108:76;2:3u").unwrap()
+        else {
             panic!("expected key");
         };
         assert_eq!(consumed, 13);
@@ -374,7 +380,8 @@ mod tests {
 
     #[test]
     fn parses_sgr_mouse() {
-        let (RawInputEvent::Mouse(mouse), consumed) = extract_one_event(b"\x1b[<0;20;10M").unwrap() else {
+        let (RawInputEvent::Mouse(mouse), consumed) = extract_one_event(b"\x1b[<0;20;10M").unwrap()
+        else {
             panic!("expected mouse");
         };
         assert_eq!(consumed, 11);
@@ -462,14 +469,26 @@ mod tests {
                 if columns.len() == 6 {
                     columns.push("");
                 }
-                assert_eq!(columns.len(), 7, "macOS fixture row must have 7 columns: {line}");
+                assert_eq!(
+                    columns.len(),
+                    7,
+                    "macOS fixture row must have 7 columns: {line}"
+                );
                 if columns[2].is_empty() {
                     continue;
                 }
                 let bytes = decode_hex(columns[2]);
                 let (event, consumed) = extract_one_event(&bytes).unwrap();
-                assert_eq!(consumed, bytes.len(), "fixture should extract a whole event: {line}");
-                assert_raw_key(event, parse_fixture_key_code(columns[3]), parse_fixture_modifiers(columns[4]));
+                assert_eq!(
+                    consumed,
+                    bytes.len(),
+                    "fixture should extract a whole event: {line}"
+                );
+                assert_raw_key(
+                    event,
+                    parse_fixture_key_code(columns[3]),
+                    parse_fixture_modifiers(columns[4]),
+                );
             } else {
                 if columns.len() == 5 {
                     columns.push("");
@@ -485,11 +504,22 @@ mod tests {
                     7 => (columns[2], columns[3], columns[4]),
                     _ => panic!("fixture row must have 6 or 7 columns: {line}"),
                 };
-                assert!(bytes_hex.chars().all(|ch| ch.is_ascii_hexdigit()), "non-hex fixture bytes: {bytes_hex} in {line}");
+                assert!(
+                    bytes_hex.chars().all(|ch| ch.is_ascii_hexdigit()),
+                    "non-hex fixture bytes: {bytes_hex} in {line}"
+                );
                 let bytes = decode_hex(bytes_hex);
                 let (event, consumed) = extract_one_event(&bytes).unwrap();
-                assert_eq!(consumed, bytes.len(), "fixture should extract a whole event: {line}");
-                assert_raw_key(event, parse_fixture_key_code(code), parse_fixture_modifiers(modifiers));
+                assert_eq!(
+                    consumed,
+                    bytes.len(),
+                    "fixture should extract a whole event: {line}"
+                );
+                assert_raw_key(
+                    event,
+                    parse_fixture_key_code(code),
+                    parse_fixture_modifiers(modifiers),
+                );
             }
         }
     }
@@ -525,7 +555,11 @@ mod tests {
         assert!(buffer.is_empty());
         let events = collect_events(&mut rx);
         assert_eq!(events.len(), 1);
-        assert_raw_key(events.into_iter().next().unwrap(), KeyCode::Up, KeyModifiers::empty());
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Up,
+            KeyModifiers::empty(),
+        );
     }
 
     #[test]
@@ -541,7 +575,11 @@ mod tests {
         assert!(buffer.is_empty());
         let events = collect_events(&mut rx);
         assert_eq!(events.len(), 1);
-        assert_raw_key(events.into_iter().next().unwrap(), KeyCode::Esc, KeyModifiers::empty());
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Esc,
+            KeyModifiers::empty(),
+        );
     }
 
     #[test]
@@ -557,7 +595,11 @@ mod tests {
         assert!(buffer.is_empty());
         let events = collect_events(&mut rx);
         assert_eq!(events.len(), 1);
-        assert_raw_key(events.into_iter().next().unwrap(), KeyCode::Down, KeyModifiers::empty());
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Down,
+            KeyModifiers::empty(),
+        );
     }
 
     #[test]
@@ -593,7 +635,11 @@ mod tests {
         assert!(buffer.is_empty());
         let events = collect_events(&mut rx);
         assert_eq!(events.len(), 1);
-        assert_raw_key(events.into_iter().next().unwrap(), KeyCode::Char('1'), KeyModifiers::SHIFT);
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Char('1'),
+            KeyModifiers::SHIFT,
+        );
     }
 
     #[test]
@@ -628,6 +674,10 @@ mod tests {
         assert!(buffer.is_empty());
         let events = collect_events(&mut rx);
         assert_eq!(events.len(), 1);
-        assert_raw_key(events.into_iter().next().unwrap(), KeyCode::Char('é'), KeyModifiers::empty());
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Char('é'),
+            KeyModifiers::empty(),
+        );
     }
 }
