@@ -19,7 +19,7 @@ it runs inside your existing terminal: ghostty, alacritty, kitty, wezterm, even 
 it is also becoming a shared control surface. you manage agents in herdr, and increasingly those agents can interact with herdr too through its local socket api, cli commands, and the example agent skill in this repo.
 
 <p align="center">
-  <img src="assets/screenshot.png" alt="herdr screenshot" width="900" />
+  <video src="https://github.com/ogulcancelik/herdr/raw/master/assets/demo.mp4" width="900" autoplay muted loop></video>
 </p>
 
 ## what herdr is
