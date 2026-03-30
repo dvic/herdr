@@ -60,11 +60,11 @@ herdr automatically detects running agents by looking at the foreground process 
 
 workspace and agent states map to:
 
-- **● red** — blocked: agent needs input or approval
-- **● blue** — done: work finished and you have not looked at it yet
-- **● yellow** — working
-- **○ green** — idle: done, seen, and calm
-- **· dim** — unknown / plain shell
+- 🔴 **blocked** — agent needs input or approval
+- 🔵 **done** — work finished and you have not looked at it yet
+- 🟡 **working** — agent is actively running
+- 🟢 **idle** — done, seen, and calm
+- ⚪ **unknown** — plain shell or undetected
 
 workspace rollups prefer the most urgent thing happening in that workspace: blocked first, then unseen finished work, then working, then idle.
 
