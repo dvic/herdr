@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.2.1] - 2026-03-31
+
 ### Added
 - Herdr now checks for updates at startup and periodically while it stays open, so long-running sessions can still discover new releases without a restart cycle.
 - Added a lightweight bottom-right toast when an update has been downloaded and is ready, with a simple restart-to-use-it flow.
