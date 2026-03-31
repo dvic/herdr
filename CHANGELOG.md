@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+- Herdr now checks for updates at startup and periodically while it stays open, so long-running sessions can still discover new releases without a restart cycle.
+- Added a lightweight bottom-right toast when an update has been downloaded and is ready, with a simple restart-to-use-it flow.
+
+### Changed
+- Rendering is now driven more directly by app events instead of relying as much on polling, which makes the UI feel snappier and cuts unnecessary redraw work.
+
+### Fixed
+- Restored smooth fast spinner animation for working agents.
+- Closing a pane or workspace now reliably terminates the processes running inside that pane session instead of leaving shells or child processes behind.
+- Fixed bracketed paste handling so incomplete paste sequences are preserved across read timeouts instead of being dropped or misread.
+
 ## [0.2.0] - 2026-03-30
 
 ### Added
