@@ -203,6 +203,26 @@ current v1 behavior:
 - suppression is tab-aware: the active tab stays quiet, but background tabs in the same workspace can still notify
 - no keyboard action or temporary key semantics
 
+## session
+
+```toml
+[session]
+autosave_interval_secs = 60
+```
+
+### options
+
+| option | default | description |
+|--------|---------|-------------|
+| `session.autosave_interval_secs` | `60` | periodic session autosave interval in seconds; set `0` to disable |
+
+notes:
+- sessions still save on normal exit even when periodic autosave is disabled
+- autosave/restore cover workspace/tab/pane layout, pane working directories, and focused tab/pane
+- restore recreates fresh shells; it does not resume running programs or scrollback
+- graceful terminal/window closes are best-effort only; hard kills and crashes cannot be recovered reliably
+- `--no-session` disables both restore and save
+
 ## sound
 
 ```toml

@@ -424,6 +424,9 @@ impl AppState {
                 .update_pane_state(pane_id, |pane| pane.release_agent(&source, agent))
                 .into_iter()
                 .collect(),
+            AppEvent::ShutdownRequested
+            | AppEvent::SessionPersistenceSucceeded { .. }
+            | AppEvent::SessionPersistenceFailed { .. } => Vec::new(),
         }
     }
 

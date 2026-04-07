@@ -22,7 +22,7 @@ use crate::workspace::Workspace;
 const SNAPSHOT_VERSION: u32 = 3;
 
 /// Serializable snapshot of the entire herdr session.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSnapshot {
     /// Format version — used to detect incompatible changes.
     #[serde(default)]
@@ -36,7 +36,7 @@ pub struct SessionSnapshot {
     pub sidebar_width: Option<u16>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceSnapshot {
     #[serde(default)]
     pub id: Option<String>,
@@ -61,7 +61,7 @@ struct LegacyWorkspaceSnapshot {
     root_pane: Option<u32>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TabSnapshot {
     #[serde(default)]
     pub custom_name: Option<String>,
@@ -74,13 +74,13 @@ pub struct TabSnapshot {
     pub root_pane: Option<u32>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaneSnapshot {
     pub cwd: PathBuf,
 }
 
 /// Serializable BSP tree.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LayoutSnapshot {
     Pane(u32),
     Split {
@@ -91,7 +91,7 @@ pub enum LayoutSnapshot {
     },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DirectionSnapshot {
     Horizontal,
     Vertical,
@@ -268,6 +268,18 @@ fn capture_node(node: &Node) -> LayoutSnapshot {
 
 // --- Restore ---
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreStatus {
+    Clean,
+    Partial,
+    Failed,
+}
+
+pub struct RestoreReport {
+    pub workspaces: Vec<Workspace>,
+    pub status: RestoreStatus,
+}
+
 /// Restore workspaces from a snapshot. Each pane gets a fresh shell in its saved cwd.
 pub fn restore(
     snapshot: &SessionSnapshot,
@@ -277,22 +289,36 @@ pub fn restore(
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
-) -> Vec<Workspace> {
-    snapshot
-        .workspaces
-        .iter()
-        .filter_map(|ws_snap| {
-            restore_workspace(
-                ws_snap,
-                rows,
-                cols,
-                scrollback_limit_bytes,
-                events.clone(),
-                render_notify.clone(),
-                render_dirty.clone(),
-            )
-        })
-        .collect()
+) -> RestoreReport {
+    let mut workspaces = Vec::new();
+    let mut failed = false;
+
+    for ws_snap in &snapshot.workspaces {
+        match restore_workspace(
+            ws_snap,
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            events.clone(),
+            render_notify.clone(),
+            render_dirty.clone(),
+        ) {
+            Some(workspace) => workspaces.push(workspace),
+            None => failed = true,
+        }
+    }
+
+    let status = if failed {
+        if workspaces.is_empty() {
+            RestoreStatus::Failed
+        } else {
+            RestoreStatus::Partial
+        }
+    } else {
+        RestoreStatus::Clean
+    };
+
+    RestoreReport { workspaces, status }
 }
 
 fn restore_workspace(
@@ -476,38 +502,90 @@ fn collect_ids_inner(node: &Node, ids: &mut Vec<PaneId>) {
 
 // --- File I/O ---
 
+#[derive(Debug)]
+pub enum LoadResult {
+    NoSnapshot,
+    Loaded(SessionSnapshot),
+    NewerSnapshotIgnored { version: u32 },
+    Failed { message: String },
+}
+
+#[derive(Debug, Clone)]
+struct PersistFailure {
+    generation: u64,
+    action: &'static str,
+    error: String,
+}
+
+#[derive(Debug)]
+enum PersistAction {
+    Save(SessionSnapshot),
+    Clear,
+}
+
+#[derive(Debug)]
+struct PendingCommand {
+    generation: u64,
+    action: PersistAction,
+}
+
+#[derive(Debug)]
+struct WorkerState {
+    pending: Option<PendingCommand>,
+    in_flight_generation: Option<u64>,
+    next_generation: u64,
+    last_completed_generation: u64,
+    last_failure: Option<PersistFailure>,
+    closed: bool,
+}
+
+#[derive(Debug)]
+struct WorkerShared {
+    state: std::sync::Mutex<WorkerState>,
+    cv: std::sync::Condvar,
+    path: PathBuf,
+    event_tx: mpsc::Sender<AppEvent>,
+}
+
+pub struct PersistenceWorker {
+    shared: Arc<WorkerShared>,
+    join_handle: Option<std::thread::JoinHandle<()>>,
+}
+
 fn session_path() -> PathBuf {
     crate::config::config_dir().join("session.json")
 }
 
-pub fn save(snapshot: &SessionSnapshot) {
-    let path = session_path();
+fn save_to_path(path: &std::path::Path, snapshot: &SessionSnapshot) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            error!(err = %e, "failed to create session directory");
-            return;
-        }
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create session directory: {e}"))?;
     }
-    let json = match serde_json::to_string_pretty(snapshot) {
-        Ok(j) => j,
-        Err(e) => {
-            error!(err = %e, "failed to serialize session");
-            return;
-        }
-    };
-    // Atomic write: write to temp file, then rename
+
+    let json = serde_json::to_string_pretty(snapshot)
+        .map_err(|e| format!("failed to serialize session: {e}"))?;
+
     let tmp_path = path.with_extension("json.tmp");
-    if let Err(e) = std::fs::write(&tmp_path, &json) {
-        error!(err = %e, "failed to write session temp file");
-        return;
-    }
-    if let Err(e) = std::fs::rename(&tmp_path, &path) {
-        error!(err = %e, "failed to rename session file");
-        // Clean up temp file
+    std::fs::write(&tmp_path, &json)
+        .map_err(|e| format!("failed to write session temp file: {e}"))?;
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);
-        return;
+        return Err(format!("failed to rename session file: {e}"));
     }
-    info!(workspaces = snapshot.workspaces.len(), "session saved");
+
+    info!(workspaces = snapshot.workspaces.len(), path = %path.display(), "session saved");
+    Ok(())
+}
+
+fn clear_path(path: &std::path::Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            info!(path = %path.display(), "session cleared");
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("failed to remove session file: {e}")),
+    }
 }
 
 fn parse_snapshot(content: &str) -> Result<SessionSnapshot, String> {
@@ -521,34 +599,206 @@ fn parse_snapshot(content: &str) -> Result<SessionSnapshot, String> {
     migrate_snapshot(raw)
 }
 
-pub fn load() -> Option<SessionSnapshot> {
+pub fn load() -> LoadResult {
     let path = session_path();
+    load_from_path(&path)
+}
+
+fn load_from_path(path: &std::path::Path) -> LoadResult {
     if !path.exists() {
-        return None;
+        return LoadResult::NoSnapshot;
     }
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(err = %e, "failed to read session file");
-            return None;
+
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) => {
+            warn!(err = %err, path = %path.display(), "failed to read session file");
+            return LoadResult::Failed {
+                message: format!("failed to read session file: {err}"),
+            };
         }
     };
+
     match parse_snapshot(&content) {
-        Ok(snap) => Some(snap),
-        Err(e) => {
+        Ok(snapshot) => LoadResult::Loaded(snapshot),
+        Err(err) => {
             if let Ok(raw) = serde_json::from_str::<RawSessionSnapshot>(&content) {
                 if raw.version > SNAPSHOT_VERSION {
                     warn!(
                         file_version = raw.version,
                         supported = SNAPSHOT_VERSION,
+                        path = %path.display(),
                         "session file is from a newer herdr version, ignoring"
                     );
-                    return None;
+                    return LoadResult::NewerSnapshotIgnored {
+                        version: raw.version,
+                    };
                 }
             }
-            warn!(err = %e, "failed to parse session file, ignoring");
-            None
+
+            warn!(err = %err, path = %path.display(), "failed to parse session file");
+            LoadResult::Failed {
+                message: format!("failed to parse session file: {err}"),
+            }
         }
+    }
+}
+
+impl PersistenceWorker {
+    pub fn new(event_tx: mpsc::Sender<AppEvent>) -> Self {
+        Self::with_path(session_path(), event_tx)
+    }
+
+    fn with_path(path: PathBuf, event_tx: mpsc::Sender<AppEvent>) -> Self {
+        let shared = Arc::new(WorkerShared {
+            state: std::sync::Mutex::new(WorkerState {
+                pending: None,
+                in_flight_generation: None,
+                next_generation: 0,
+                last_completed_generation: 0,
+                last_failure: None,
+                closed: false,
+            }),
+            cv: std::sync::Condvar::new(),
+            path,
+            event_tx,
+        });
+        let worker_shared = shared.clone();
+        let join_handle = std::thread::spawn(move || worker_loop(worker_shared));
+
+        Self {
+            shared,
+            join_handle: Some(join_handle),
+        }
+    }
+
+    pub fn enqueue_save(&self, snapshot: SessionSnapshot) -> u64 {
+        self.enqueue(PersistAction::Save(snapshot))
+    }
+
+    pub fn enqueue_clear(&self) -> u64 {
+        self.enqueue(PersistAction::Clear)
+    }
+
+    fn enqueue(&self, action: PersistAction) -> u64 {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .expect("persistence state poisoned");
+        state.next_generation += 1;
+        let generation = state.next_generation;
+        state.pending = Some(PendingCommand { generation, action });
+        self.shared.cv.notify_one();
+        generation
+    }
+
+    pub fn flush(&self) -> Result<(), String> {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .expect("persistence state poisoned");
+        let target_generation = state
+            .pending
+            .as_ref()
+            .map(|command| command.generation)
+            .or(state.in_flight_generation)
+            .unwrap_or(state.last_completed_generation);
+
+        while state.pending.is_some()
+            || state.in_flight_generation.is_some()
+            || state.last_completed_generation < target_generation
+        {
+            state = self
+                .shared
+                .cv
+                .wait(state)
+                .expect("persistence state poisoned");
+        }
+
+        if let Some(failure) = &state.last_failure {
+            if failure.generation == target_generation {
+                return Err(format!("{}: {}", failure.action, failure.error));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn shutdown(mut self) -> Result<(), String> {
+        let flush_result = self.flush();
+        {
+            let mut state = self
+                .shared
+                .state
+                .lock()
+                .expect("persistence state poisoned");
+            state.closed = true;
+            self.shared.cv.notify_one();
+        }
+        if let Some(join_handle) = self.join_handle.take() {
+            let _ = join_handle.join();
+        }
+        flush_result
+    }
+}
+
+fn worker_loop(shared: Arc<WorkerShared>) {
+    loop {
+        let command = {
+            let mut state = shared.state.lock().expect("persistence state poisoned");
+            while state.pending.is_none() && !state.closed {
+                state = shared.cv.wait(state).expect("persistence state poisoned");
+            }
+            if state.closed && state.pending.is_none() {
+                return;
+            }
+            let command = state.pending.take().expect("pending command missing");
+            state.in_flight_generation = Some(command.generation);
+            command
+        };
+
+        let result = match &command.action {
+            PersistAction::Save(snapshot) => save_to_path(&shared.path, snapshot)
+                .map(|_| AppEvent::SessionPersistenceSucceeded {
+                    generation: command.generation,
+                })
+                .map_err(|error| PersistFailure {
+                    generation: command.generation,
+                    action: "save session",
+                    error,
+                }),
+            PersistAction::Clear => clear_path(&shared.path)
+                .map(|_| AppEvent::SessionPersistenceSucceeded {
+                    generation: command.generation,
+                })
+                .map_err(|error| PersistFailure {
+                    generation: command.generation,
+                    action: "clear session",
+                    error,
+                }),
+        };
+
+        let mut state = shared.state.lock().expect("persistence state poisoned");
+        state.in_flight_generation = None;
+        state.last_completed_generation = command.generation;
+        match result {
+            Ok(event) => {
+                state.last_failure = None;
+                let _ = shared.event_tx.try_send(event);
+            }
+            Err(failure) => {
+                let event = AppEvent::SessionPersistenceFailed {
+                    generation: failure.generation,
+                    action: failure.action,
+                    error: failure.error.clone(),
+                };
+                state.last_failure = Some(failure);
+                let _ = shared.event_tx.try_send(event);
+            }
+        }
+        shared.cv.notify_all();
     }
 }
 
@@ -785,10 +1035,118 @@ mod tests {
         assert!(parse_snapshot(json).is_err());
     }
 
+    fn temp_session_path(name: &str) -> PathBuf {
+        let unique = format!(
+            "herdr-persist-tests-{}-{}-{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("session.json")
+    }
+
+    fn sample_snapshot(label: &str) -> SessionSnapshot {
+        SessionSnapshot {
+            version: SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some(format!("w-{label}")),
+                custom_name: Some(label.to_string()),
+                identity_cwd: PathBuf::from("/tmp"),
+                tabs: vec![TabSnapshot {
+                    custom_name: Some("main".to_string()),
+                    layout: LayoutSnapshot::Pane(0),
+                    panes: HashMap::from([(
+                        0,
+                        PaneSnapshot {
+                            cwd: PathBuf::from("/tmp"),
+                        },
+                    )]),
+                    zoomed: false,
+                    focused: Some(0),
+                    root_pane: Some(0),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            agent_panel_scope: crate::app::state::AgentPanelScope::CurrentWorkspace,
+            sidebar_width: Some(26),
+        }
+    }
+
     #[test]
     fn active_tab_default_is_zero() {
         let json = r#"{"custom_name":"test","identity_cwd":"/tmp","tabs":[]}"#;
         let ws: WorkspaceSnapshot = serde_json::from_str(json).unwrap();
         assert_eq!(ws.active_tab, 0);
+    }
+
+    #[test]
+    fn clear_path_removes_existing_session_file() {
+        let path = temp_session_path("clear");
+        save_to_path(&path, &sample_snapshot("clear")).unwrap();
+        clear_path(&path).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn clear_path_ignores_missing_session_file() {
+        let path = temp_session_path("missing");
+        clear_path(&path).unwrap();
+    }
+
+    #[test]
+    fn worker_save_then_clear_leaves_no_session_file() {
+        let path = temp_session_path("save-clear");
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let worker = PersistenceWorker::with_path(path.clone(), event_tx);
+
+        worker.enqueue_save(sample_snapshot("first"));
+        worker.enqueue_clear();
+        worker.shutdown().unwrap();
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn worker_clear_then_save_leaves_newer_snapshot() {
+        let path = temp_session_path("clear-save");
+        save_to_path(&path, &sample_snapshot("old")).unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let worker = PersistenceWorker::with_path(path.clone(), event_tx);
+
+        worker.enqueue_clear();
+        worker.enqueue_save(sample_snapshot("new"));
+        worker.shutdown().unwrap();
+
+        let LoadResult::Loaded(snapshot) = load_from_path(&path) else {
+            panic!("expected saved snapshot after clear->save");
+        };
+        assert_eq!(snapshot.workspaces[0].custom_name.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn worker_coalesces_to_latest_pending_snapshot() {
+        let path = temp_session_path("coalesce");
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let worker = PersistenceWorker::with_path(path.clone(), event_tx);
+
+        for idx in 0..20 {
+            worker.enqueue_save(sample_snapshot(&format!("snap-{idx}")));
+        }
+        worker.shutdown().unwrap();
+
+        let LoadResult::Loaded(snapshot) = load_from_path(&path) else {
+            panic!("expected latest snapshot to persist");
+        };
+        assert_eq!(
+            snapshot.workspaces[0].custom_name.as_deref(),
+            Some("snap-19")
+        );
     }
 }

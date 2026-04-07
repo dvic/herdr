@@ -142,6 +142,22 @@ pub fn process_exists(pid: u32) -> bool {
     }
 }
 
+pub async fn wait_for_shutdown_request() -> std::io::Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut sighup = signal(SignalKind::hangup())?;
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+
+    tokio::select! {
+        _ = sighup.recv() => {}
+        _ = sigterm.recv() => {}
+        _ = sigint.recv() => {}
+    }
+
+    Ok(())
+}
+
 fn process_session_id(pid: u32) -> Option<i32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let rest = stat.get(stat.rfind(')')? + 2..)?;
