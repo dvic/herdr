@@ -6,6 +6,7 @@
 
 mod actions;
 mod input;
+mod session;
 pub mod state;
 
 use std::collections::HashSet;
@@ -32,6 +33,8 @@ use crate::config::Config;
 use crate::events::AppEvent;
 use crate::workspace::Workspace;
 
+use self::session::{SessionDiagnostics, SessionPersistenceController};
+
 pub use state::{AppState, Mode, ToastKind, ViewState};
 
 /// Full application: AppState + runtime concerns (event channels, async I/O).
@@ -43,13 +46,8 @@ pub struct App {
     persistence_status_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
     event_hub: crate::api::EventHub,
     last_focus: Option<(usize, crate::layout::PaneId)>,
-    no_session: bool,
-    persistence_worker: Option<crate::persist::PersistenceWorker>,
-    session_autosave_interval: Option<Duration>,
-    next_session_save: Option<Instant>,
-    persistence_armed: bool,
-    restore_outcome: RestoreOutcome,
-    shutdown_listener_diagnostic: Option<String>,
+    session_persistence: SessionPersistenceController,
+    session_diagnostics: SessionDiagnostics,
     input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
     last_terminal_size: Option<(u16, u16)>,
     config_diagnostic_deadline: Option<Instant>,
@@ -63,15 +61,6 @@ pub struct App {
     suppressed_repeat_keys: HashSet<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RestoreOutcome {
-    NoSnapshot,
-    CleanRestore,
-    PartialRestore,
-    RestoreFailed,
-    NewerSnapshotIgnored,
 }
 
 enum LoopEvent {
@@ -184,122 +173,20 @@ impl App {
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(AtomicBool::new(false));
 
-        // Try to restore previous session
-        let (
-            workspaces,
-            active,
-            selected,
-            agent_panel_scope,
-            sidebar_width,
-            restore_outcome,
-            session_diagnostic,
-        ) = if no_session {
-            (
-                Vec::new(),
-                None,
-                0,
-                state::AgentPanelScope::CurrentWorkspace,
-                config.ui.sidebar_width,
-                RestoreOutcome::NoSnapshot,
-                None,
-            )
-        } else {
-            match crate::persist::load() {
-                    crate::persist::LoadResult::NoSnapshot => (
-                        Vec::new(),
-                        None,
-                        0,
-                        state::AgentPanelScope::CurrentWorkspace,
-                        config.ui.sidebar_width,
-                        RestoreOutcome::NoSnapshot,
-                        None,
-                    ),
-                    crate::persist::LoadResult::Loaded(snap) => {
-                        let report = crate::persist::restore(
-                            &snap,
-                            24,
-                            80,
-                            config.advanced.scrollback_limit_bytes,
-                            event_tx.clone(),
-                            render_notify.clone(),
-                            render_dirty.clone(),
-                        );
-                        let sidebar_width = snap.sidebar_width.unwrap_or(config.ui.sidebar_width);
-                        match report.status {
-                            crate::persist::RestoreStatus::Clean => {
-                                info!(count = report.workspaces.len(), "session restored");
-                                let active = snap.active.filter(|&i| i < report.workspaces.len());
-                                let selected = if report.workspaces.is_empty() {
-                                    0
-                                } else {
-                                    snap.selected.min(report.workspaces.len().saturating_sub(1))
-                                };
-                                (
-                                    report.workspaces,
-                                    active,
-                                    selected,
-                                    snap.agent_panel_scope,
-                                    sidebar_width,
-                                    RestoreOutcome::CleanRestore,
-                                    None,
-                                )
-                            }
-                            crate::persist::RestoreStatus::Partial => {
-                                info!(count = report.workspaces.len(), "session restored partially");
-                                let active = snap.active.filter(|&i| i < report.workspaces.len());
-                                let selected = if report.workspaces.is_empty() {
-                                    0
-                                } else {
-                                    snap.selected.min(report.workspaces.len().saturating_sub(1))
-                                };
-                                (
-                                    report.workspaces,
-                                    active,
-                                    selected,
-                                    snap.agent_panel_scope,
-                                    sidebar_width,
-                                    RestoreOutcome::PartialRestore,
-                                    Some("session restored partially; autosave paused until you make a structural session change".to_string()),
-                                )
-                            }
-                            crate::persist::RestoreStatus::Failed => {
-                                info!("session file found but no workspaces restored");
-                                (
-                                    Vec::new(),
-                                    None,
-                                    0,
-                                    snap.agent_panel_scope,
-                                    sidebar_width,
-                                    RestoreOutcome::RestoreFailed,
-                                    Some("session restore failed; keeping existing session.json until you make a structural session change".to_string()),
-                                )
-                            }
-                        }
-                    }
-                    crate::persist::LoadResult::NewerSnapshotIgnored { version } => (
-                        Vec::new(),
-                        None,
-                        0,
-                        state::AgentPanelScope::CurrentWorkspace,
-                        config.ui.sidebar_width,
-                        RestoreOutcome::NewerSnapshotIgnored,
-                        Some(format!(
-                            "session snapshot is from newer herdr version {version}; autosave paused until you make a structural session change"
-                        )),
-                    ),
-                    crate::persist::LoadResult::Failed { message } => (
-                        Vec::new(),
-                        None,
-                        0,
-                        state::AgentPanelScope::CurrentWorkspace,
-                        config.ui.sidebar_width,
-                        RestoreOutcome::RestoreFailed,
-                        Some(format!(
-                            "{message}; autosave paused until you make a structural session change"
-                        )),
-                    ),
-                }
-        };
+        let startup_session = session::load_startup_session(
+            config,
+            no_session,
+            event_tx.clone(),
+            render_notify.clone(),
+            render_dirty.clone(),
+        );
+        let workspaces = startup_session.workspaces;
+        let active = startup_session.active;
+        let selected = startup_session.selected;
+        let agent_panel_scope = startup_session.agent_panel_scope;
+        let sidebar_width = startup_session.sidebar_width;
+        let restore_outcome = startup_session.restore_outcome;
+        let session_diagnostics = startup_session.diagnostics;
 
         info!(
             pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes,
@@ -359,9 +246,9 @@ impl App {
             latest_release_notes_available,
             update_dismissed: false,
             config_diagnostic,
-            session_diagnostic,
+            session_diagnostic: session_diagnostics.current(),
             toast: None,
-            persistence_relevant_mutation: false,
+            session_edits: session::SessionEditTracker::default(),
             prefix_code,
             prefix_mods,
             default_sidebar_width: config.ui.sidebar_width,
@@ -409,18 +296,6 @@ impl App {
                 .get(idx)
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
-        let persistence_armed = !no_session
-            && matches!(
-                restore_outcome,
-                RestoreOutcome::NoSnapshot | RestoreOutcome::CleanRestore
-            );
-        let session_autosave_interval = (!no_session && config.session.autosave_interval_secs > 0)
-            .then_some(Duration::from_secs(config.session.autosave_interval_secs));
-        let next_session_save = if persistence_armed {
-            session_autosave_interval.map(|interval| Instant::now() + interval)
-        } else {
-            None
-        };
         let (persistence_worker, persistence_status_rx) =
             if let Some((persistence_status_tx, persistence_status_rx)) =
                 persistence_status_channels
@@ -434,6 +309,12 @@ impl App {
             } else {
                 (None, None)
             };
+        let session_persistence = SessionPersistenceController::new(
+            no_session,
+            config.session.autosave_interval_secs,
+            persistence_worker,
+            restore_outcome,
+        );
 
         Self {
             config_diagnostic_deadline: state
@@ -456,13 +337,8 @@ impl App {
             api_rx,
             event_hub,
             last_focus,
-            no_session,
-            persistence_worker,
-            session_autosave_interval,
-            next_session_save,
-            persistence_armed,
-            restore_outcome,
-            shutdown_listener_diagnostic: None,
+            session_persistence,
+            session_diagnostics,
             input_rx: None,
             last_terminal_size: terminal::size().ok(),
             render_notify,
@@ -718,44 +594,18 @@ impl App {
     }
 
     fn refresh_persistence_gate(&mut self, now: Instant) {
-        if self.no_session || self.persistence_armed {
-            return;
-        }
-
-        if self.state.persistence_relevant_mutation {
-            info!(restore_outcome = ?self.restore_outcome, "session persistence armed after structural change");
-            self.persistence_armed = true;
-            if self.next_session_save.is_none() {
-                self.next_session_save = self
-                    .session_autosave_interval
-                    .map(|interval| now + interval);
-            }
-        }
+        self.session_persistence
+            .arm_if_needed(now, self.state.has_persistence_relevant_mutation());
     }
 
     fn enqueue_session_persistence(&mut self) -> Option<u64> {
-        if self.no_session || !self.persistence_armed {
-            return None;
-        }
-
-        let worker = self.persistence_worker.as_ref()?;
-        Some(if self.state.workspaces.is_empty() {
-            worker.enqueue_clear()
-        } else {
-            worker.enqueue_save(self.capture_session_snapshot())
-        })
+        self.session_persistence
+            .enqueue_snapshot(self.capture_session_snapshot())
     }
 
     fn finalize_persistence(&mut self) -> io::Result<()> {
-        if self.persistence_armed {
-            let _ = self.enqueue_session_persistence();
-        }
-
-        let Some(worker) = self.persistence_worker.take() else {
-            return Ok(());
-        };
-
-        worker.shutdown().map_err(io::Error::other)
+        self.session_persistence
+            .finalize(Some(self.capture_session_snapshot()))
     }
 
     fn finish_run(&mut self, run_result: io::Result<()>) -> io::Result<()> {
@@ -851,15 +701,9 @@ impl App {
             self.run_auto_update_check();
         }
 
-        if self
-            .next_session_save
-            .is_some_and(|deadline| now >= deadline)
-        {
+        if self.session_persistence.autosave_due(now) {
             let _ = self.enqueue_session_persistence();
-            self.next_session_save = self
-                .session_autosave_interval
-                .filter(|_| self.persistence_armed)
-                .map(|interval| now + interval);
+            self.session_persistence.reschedule_after_save_attempt(now);
         }
 
         self.sync_animation_timer(now);
@@ -933,7 +777,7 @@ impl App {
             self.next_animation_tick,
             self.git_refresh_deadline(),
             self.next_auto_update_check,
-            self.next_session_save,
+            self.session_persistence.next_save_deadline(),
             render_deadline,
         ]
         .into_iter()
@@ -958,15 +802,14 @@ impl App {
             }
             AppEvent::ShutdownListenerFailed { error } => {
                 tracing::error!(error = %error, "shutdown listener failed");
-                self.shutdown_listener_diagnostic = Some(format!(
-                    "graceful shutdown persistence unavailable: {error}"
-                ));
-                self.state.session_diagnostic = self.shutdown_listener_diagnostic.clone();
+                self.session_diagnostics.shutdown_listener_failed(error);
+                self.sync_session_diagnostic();
                 return;
             }
             AppEvent::SessionPersistenceSucceeded { generation } => {
                 tracing::debug!(generation = *generation, "session persistence succeeded");
-                self.state.session_diagnostic = self.shutdown_listener_diagnostic.clone();
+                self.session_diagnostics.persistence_succeeded();
+                self.sync_session_diagnostic();
                 return;
             }
             AppEvent::SessionPersistenceFailed {
@@ -975,7 +818,8 @@ impl App {
                 error,
             } => {
                 tracing::error!(generation = *generation, action = *action, error = %error, "session persistence failed");
-                self.state.session_diagnostic = Some(format!("{action} failed: {error}"));
+                self.session_diagnostics.persistence_failed(action, error);
+                self.sync_session_diagnostic();
                 return;
             }
             AppEvent::PaneDied { pane_id } => {
@@ -1015,6 +859,10 @@ impl App {
             }
         }
         self.sync_toast_deadline(previous_toast);
+    }
+
+    fn sync_session_diagnostic(&mut self) {
+        self.state.session_diagnostic = self.session_diagnostics.current();
     }
 
     fn emit_pane_state_update(&self, update: &crate::app::actions::PaneStateUpdate) {
@@ -2564,6 +2412,15 @@ mod tests {
         )
     }
 
+    fn enable_partial_restore_persistence(app: &mut App, interval_secs: u64) {
+        app.session_persistence = SessionPersistenceController::new(
+            false,
+            interval_secs,
+            None,
+            session::RestoreOutcome::PartialRestore,
+        );
+    }
+
     #[tokio::test]
     async fn raw_input_waits_when_reader_is_gone() {
         let result =
@@ -2771,25 +2628,20 @@ mod tests {
     #[test]
     fn structural_session_change_arms_persistence_after_partial_restore() {
         let mut app = test_app();
-        app.no_session = false;
-        app.restore_outcome = RestoreOutcome::PartialRestore;
-        app.persistence_armed = false;
-        app.session_autosave_interval = Some(Duration::from_secs(10));
+        enable_partial_restore_persistence(&mut app, 10);
         app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
 
         app.state.move_workspace(0, app.state.workspaces.len());
         app.refresh_persistence_gate(Instant::now());
 
-        assert!(app.persistence_armed);
-        assert!(app.next_session_save.is_some());
+        assert!(app.session_persistence.is_armed());
+        assert!(app.session_persistence.next_save_deadline().is_some());
     }
 
     #[test]
     fn focus_change_does_not_arm_persistence_after_partial_restore() {
         let mut app = test_app();
-        app.no_session = false;
-        app.restore_outcome = RestoreOutcome::PartialRestore;
-        app.persistence_armed = false;
+        enable_partial_restore_persistence(&mut app, 60);
         app.state.workspaces = vec![Workspace::test_new("test")];
         let second_pane =
             app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
@@ -2798,16 +2650,13 @@ mod tests {
         tab.layout.focus_pane(second_pane);
         app.refresh_persistence_gate(Instant::now());
 
-        assert!(!app.persistence_armed);
+        assert!(!app.session_persistence.is_armed());
     }
 
     #[test]
     fn ratio_only_resize_arms_persistence_after_partial_restore() {
         let mut app = test_app();
-        app.no_session = false;
-        app.restore_outcome = RestoreOutcome::PartialRestore;
-        app.persistence_armed = false;
-        app.session_autosave_interval = Some(Duration::from_secs(60));
+        enable_partial_restore_persistence(&mut app, 60);
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
@@ -2816,49 +2665,40 @@ mod tests {
         app.state.resize_pane(crate::layout::NavDirection::Right);
         app.refresh_persistence_gate(Instant::now());
 
-        assert!(app.persistence_armed);
-        assert!(app.next_session_save.is_some());
+        assert!(app.session_persistence.is_armed());
+        assert!(app.session_persistence.next_save_deadline().is_some());
     }
 
     #[test]
     fn changing_agent_panel_scope_does_not_arm_persistence_after_partial_restore() {
         let mut app = test_app();
-        app.no_session = false;
-        app.restore_outcome = RestoreOutcome::PartialRestore;
-        app.persistence_armed = false;
-        app.session_autosave_interval = Some(Duration::from_secs(60));
+        enable_partial_restore_persistence(&mut app, 60);
         app.state.workspaces = vec![Workspace::test_new("test")];
 
         app.state.agent_panel_scope = crate::app::state::AgentPanelScope::AllWorkspaces;
         app.refresh_persistence_gate(Instant::now());
 
-        assert!(!app.persistence_armed);
-        assert!(app.next_session_save.is_none());
+        assert!(!app.session_persistence.is_armed());
+        assert!(app.session_persistence.next_save_deadline().is_none());
     }
 
     #[test]
     fn changing_sidebar_width_does_not_arm_persistence_after_partial_restore() {
         let mut app = test_app();
-        app.no_session = false;
-        app.restore_outcome = RestoreOutcome::PartialRestore;
-        app.persistence_armed = false;
-        app.session_autosave_interval = Some(Duration::from_secs(60));
+        enable_partial_restore_persistence(&mut app, 60);
         app.state.workspaces = vec![Workspace::test_new("test")];
 
         app.state.sidebar_width += 1;
         app.refresh_persistence_gate(Instant::now());
 
-        assert!(!app.persistence_armed);
-        assert!(app.next_session_save.is_none());
+        assert!(!app.session_persistence.is_armed());
+        assert!(app.session_persistence.next_save_deadline().is_none());
     }
 
     #[test]
     fn reverted_structural_edit_still_arms_persistence_after_partial_restore() {
         let mut app = test_app();
-        app.no_session = false;
-        app.restore_outcome = RestoreOutcome::PartialRestore;
-        app.persistence_armed = false;
-        app.session_autosave_interval = Some(Duration::from_secs(60));
+        enable_partial_restore_persistence(&mut app, 60);
         app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
         let original_ids: Vec<_> = app
             .state
@@ -2880,8 +2720,8 @@ mod tests {
 
         app.refresh_persistence_gate(Instant::now());
 
-        assert!(app.persistence_armed);
-        assert!(app.next_session_save.is_some());
+        assert!(app.session_persistence.is_armed());
+        assert!(app.session_persistence.next_save_deadline().is_some());
     }
 
     #[tokio::test]
@@ -2897,10 +2737,7 @@ mod tests {
     #[test]
     fn background_pane_exit_does_not_arm_persistence_after_partial_restore() {
         let mut app = test_app();
-        app.no_session = false;
-        app.restore_outcome = RestoreOutcome::PartialRestore;
-        app.persistence_armed = false;
-        app.session_autosave_interval = Some(Duration::from_secs(60));
+        enable_partial_restore_persistence(&mut app, 60);
         let ws = Workspace::test_new("test");
         let pane_id = ws.tabs[0].root_pane;
         app.state.workspaces = vec![ws];
@@ -2910,8 +2747,8 @@ mod tests {
         app.handle_internal_event(AppEvent::PaneDied { pane_id });
         app.refresh_persistence_gate(Instant::now());
 
-        assert!(!app.persistence_armed);
-        assert!(app.next_session_save.is_none());
+        assert!(!app.session_persistence.is_armed());
+        assert!(app.session_persistence.next_save_deadline().is_none());
     }
 
     #[test]
