@@ -40,6 +40,7 @@ pub struct App {
     pub event_tx: mpsc::Sender<AppEvent>,
     event_rx: mpsc::Receiver<AppEvent>,
     api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
+    persistence_status_rx: tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     event_hub: crate::api::EventHub,
     last_focus: Option<(usize, crate::layout::PaneId)>,
     no_session: bool,
@@ -97,6 +98,7 @@ enum LayoutStructureFingerprint {
     Pane,
     Split {
         direction: ratatui::layout::Direction,
+        ratio_bits: u32,
         first: Box<LayoutStructureFingerprint>,
         second: Box<LayoutStructureFingerprint>,
     },
@@ -160,11 +162,12 @@ fn layout_structure_fingerprint(node: &crate::layout::Node) -> LayoutStructureFi
         crate::layout::Node::Pane(_) => LayoutStructureFingerprint::Pane,
         crate::layout::Node::Split {
             direction,
+            ratio,
             first,
             second,
-            ..
         } => LayoutStructureFingerprint::Split {
             direction: *direction,
+            ratio_bits: ratio.to_bits(),
             first: Box::new(layout_structure_fingerprint(first)),
             second: Box::new(layout_structure_fingerprint(second)),
         },
@@ -234,6 +237,7 @@ impl App {
     ) -> Self {
         let (prefix_code, prefix_mods) = config.prefix_key();
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(64);
+        let (persistence_status_tx, persistence_status_rx) = tokio::sync::mpsc::unbounded_channel();
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(AtomicBool::new(false));
 
@@ -475,7 +479,7 @@ impl App {
             None
         };
         let persistence_worker =
-            (!no_session).then(|| crate::persist::PersistenceWorker::new(event_tx.clone()));
+            (!no_session).then(|| crate::persist::PersistenceWorker::new(persistence_status_tx));
 
         Self {
             config_diagnostic_deadline: state
@@ -486,6 +490,7 @@ impl App {
             state,
             event_tx,
             event_rx,
+            persistence_status_rx,
             last_git_remote_status_refresh: Instant::now(),
             last_sidebar_divider_click: None,
             next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
@@ -525,6 +530,9 @@ impl App {
             }
 
             // Drain internal events first so API reads observe fresh pane state.
+            if self.drain_persistence_events() {
+                needs_render = true;
+            }
             if self.drain_internal_events() {
                 needs_render = true;
             }
@@ -585,6 +593,10 @@ impl App {
                         Some(ev) => LoopEvent::Internal(ev),
                         None => LoopEvent::Timer,
                     },
+                    maybe_persist_ev = self.persistence_status_rx.recv() => match maybe_persist_ev {
+                        Some(ev) => LoopEvent::Internal(ev),
+                        None => LoopEvent::Timer,
+                    },
                     maybe_input = recv_raw_input_or_pending(input_rx) => match maybe_input {
                         Some(input) => LoopEvent::RawInput(input),
                         None => LoopEvent::InputClosed,
@@ -625,6 +637,15 @@ impl App {
         self.finalize_persistence()?;
 
         Ok(())
+    }
+
+    fn drain_persistence_events(&mut self) -> bool {
+        let mut had_event = false;
+        while let Ok(ev) = self.persistence_status_rx.try_recv() {
+            had_event = true;
+            self.handle_internal_event(ev);
+        }
+        had_event
     }
 
     fn drain_api_requests(&mut self) -> bool {
@@ -2769,5 +2790,43 @@ mod tests {
         app.refresh_persistence_gate(Instant::now());
 
         assert!(!app.persistence_armed);
+    }
+
+    #[test]
+    fn ratio_only_resize_arms_persistence_after_partial_restore() {
+        let mut app = test_app();
+        app.no_session = false;
+        app.restore_outcome = RestoreOutcome::PartialRestore;
+        app.persistence_armed = false;
+        app.session_autosave_interval = Some(Duration::from_secs(60));
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.startup_session_structure = session_structure_fingerprint(&app.state.workspaces);
+
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .set_ratio_at(&[], 0.7);
+        app.refresh_persistence_gate(Instant::now());
+
+        assert!(app.persistence_armed);
+        assert!(app.next_session_save.is_some());
+    }
+
+    #[test]
+    fn persistence_events_update_session_diagnostic() {
+        let mut app = test_app();
+
+        app.handle_internal_event(AppEvent::SessionPersistenceFailed {
+            generation: 1,
+            action: "save session",
+            error: "disk full".to_string(),
+        });
+        assert_eq!(
+            app.state.session_diagnostic.as_deref(),
+            Some("save session failed: disk full")
+        );
+
+        app.handle_internal_event(AppEvent::SessionPersistenceSucceeded { generation: 2 });
+        assert_eq!(app.state.session_diagnostic, None);
     }
 }

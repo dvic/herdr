@@ -544,7 +544,7 @@ struct WorkerShared {
     state: std::sync::Mutex<WorkerState>,
     cv: std::sync::Condvar,
     path: PathBuf,
-    event_tx: mpsc::Sender<AppEvent>,
+    event_tx: mpsc::UnboundedSender<AppEvent>,
 }
 
 pub struct PersistenceWorker {
@@ -645,11 +645,11 @@ fn load_from_path(path: &std::path::Path) -> LoadResult {
 }
 
 impl PersistenceWorker {
-    pub fn new(event_tx: mpsc::Sender<AppEvent>) -> Self {
+    pub fn new(event_tx: mpsc::UnboundedSender<AppEvent>) -> Self {
         Self::with_path(session_path(), event_tx)
     }
 
-    fn with_path(path: PathBuf, event_tx: mpsc::Sender<AppEvent>) -> Self {
+    fn with_path(path: PathBuf, event_tx: mpsc::UnboundedSender<AppEvent>) -> Self {
         let shared = Arc::new(WorkerShared {
             state: std::sync::Mutex::new(WorkerState {
                 pending: None,
@@ -737,10 +737,15 @@ impl PersistenceWorker {
             state.closed = true;
             self.shared.cv.notify_one();
         }
-        if let Some(join_handle) = self.join_handle.take() {
-            let _ = join_handle.join();
-        }
-        flush_result
+        let join_result = if let Some(join_handle) = self.join_handle.take() {
+            join_handle
+                .join()
+                .map_err(|_| "persistence worker panicked".to_string())
+        } else {
+            Ok(())
+        };
+
+        flush_result.and(join_result)
     }
 }
 
@@ -786,7 +791,10 @@ fn worker_loop(shared: Arc<WorkerShared>) {
         match result {
             Ok(event) => {
                 state.last_failure = None;
-                let _ = shared.event_tx.try_send(event);
+                shared
+                    .event_tx
+                    .send(event)
+                    .expect("persistence status receiver dropped");
             }
             Err(failure) => {
                 let event = AppEvent::SessionPersistenceFailed {
@@ -795,7 +803,10 @@ fn worker_loop(shared: Arc<WorkerShared>) {
                     error: failure.error.clone(),
                 };
                 state.last_failure = Some(failure);
-                let _ = shared.event_tx.try_send(event);
+                shared
+                    .event_tx
+                    .send(event)
+                    .expect("persistence status receiver dropped");
             }
         }
         shared.cv.notify_all();
@@ -1103,7 +1114,7 @@ mod tests {
     #[test]
     fn worker_save_then_clear_leaves_no_session_file() {
         let path = temp_session_path("save-clear");
-        let (event_tx, _event_rx) = mpsc::channel(8);
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
         let worker = PersistenceWorker::with_path(path.clone(), event_tx);
 
         worker.enqueue_save(sample_snapshot("first"));
@@ -1117,7 +1128,7 @@ mod tests {
     fn worker_clear_then_save_leaves_newer_snapshot() {
         let path = temp_session_path("clear-save");
         save_to_path(&path, &sample_snapshot("old")).unwrap();
-        let (event_tx, _event_rx) = mpsc::channel(8);
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
         let worker = PersistenceWorker::with_path(path.clone(), event_tx);
 
         worker.enqueue_clear();
@@ -1133,7 +1144,7 @@ mod tests {
     #[test]
     fn worker_coalesces_to_latest_pending_snapshot() {
         let path = temp_session_path("coalesce");
-        let (event_tx, _event_rx) = mpsc::channel(8);
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
         let worker = PersistenceWorker::with_path(path.clone(), event_tx);
 
         for idx in 0..20 {
