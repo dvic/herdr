@@ -6,6 +6,7 @@
 
 mod actions;
 mod input;
+mod session;
 pub mod state;
 
 use std::collections::HashSet;
@@ -32,6 +33,8 @@ use crate::config::Config;
 use crate::events::AppEvent;
 use crate::workspace::Workspace;
 
+use self::session::{SessionDiagnostics, SessionPersistenceController};
+
 pub use state::{AppState, Mode, ToastKind, ViewState};
 
 /// Full application: AppState + runtime concerns (event channels, async I/O).
@@ -40,9 +43,11 @@ pub struct App {
     pub event_tx: mpsc::Sender<AppEvent>,
     event_rx: mpsc::Receiver<AppEvent>,
     api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
+    persistence_status_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
     event_hub: crate::api::EventHub,
     last_focus: Option<(usize, crate::layout::PaneId)>,
-    no_session: bool,
+    session_persistence: SessionPersistenceController,
+    session_diagnostics: SessionDiagnostics,
     input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
     last_terminal_size: Option<(u16, u16)>,
     config_diagnostic_deadline: Option<Instant>,
@@ -64,6 +69,7 @@ enum LoopEvent {
     Api(crate::api::ApiRequestMessage),
     RawInput(crate::raw_input::RawInputEvent),
     InputClosed,
+    PersistenceClosed,
     RenderRequested,
 }
 
@@ -71,6 +77,15 @@ async fn recv_raw_input_or_pending(
     input_rx: Option<&mut mpsc::Receiver<crate::raw_input::RawInputEvent>>,
 ) -> Option<crate::raw_input::RawInputEvent> {
     match input_rx {
+        Some(rx) => rx.recv().await,
+        None => pending().await,
+    }
+}
+
+async fn recv_persistence_event_or_pending(
+    persistence_status_rx: Option<&mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
+) -> Option<AppEvent> {
+    match persistence_status_rx {
         Some(rx) => rx.recv().await,
         None => pending().await,
     }
@@ -153,58 +168,25 @@ impl App {
     ) -> Self {
         let (prefix_code, prefix_mods) = config.prefix_key();
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(64);
+        let persistence_status_channels =
+            (!no_session).then(tokio::sync::mpsc::unbounded_channel::<AppEvent>);
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(AtomicBool::new(false));
 
-        // Try to restore previous session
-        let (workspaces, active, selected, agent_panel_scope, sidebar_width) = if no_session {
-            (
-                Vec::new(),
-                None,
-                0,
-                state::AgentPanelScope::CurrentWorkspace,
-                config.ui.sidebar_width,
-            )
-        } else if let Some(snap) = crate::persist::load() {
-            let ws = crate::persist::restore(
-                &snap,
-                24,
-                80,
-                config.advanced.scrollback_limit_bytes,
-                event_tx.clone(),
-                render_notify.clone(),
-                render_dirty.clone(),
-            );
-            if ws.is_empty() {
-                info!("session file found but no workspaces restored");
-                (
-                    Vec::new(),
-                    None,
-                    0,
-                    snap.agent_panel_scope,
-                    snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
-                )
-            } else {
-                info!(count = ws.len(), "session restored");
-                let active = snap.active.filter(|&i| i < ws.len());
-                let selected = snap.selected.min(ws.len().saturating_sub(1));
-                (
-                    ws,
-                    active,
-                    selected,
-                    snap.agent_panel_scope,
-                    snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
-                )
-            }
-        } else {
-            (
-                Vec::new(),
-                None,
-                0,
-                state::AgentPanelScope::CurrentWorkspace,
-                config.ui.sidebar_width,
-            )
-        };
+        let startup_session = session::load_startup_session(
+            config,
+            no_session,
+            event_tx.clone(),
+            render_notify.clone(),
+            render_dirty.clone(),
+        );
+        let workspaces = startup_session.workspaces;
+        let active = startup_session.active;
+        let selected = startup_session.selected;
+        let agent_panel_scope = startup_session.agent_panel_scope;
+        let sidebar_width = startup_session.sidebar_width;
+        let restore_outcome = startup_session.restore_outcome;
+        let session_diagnostics = startup_session.diagnostics;
 
         info!(
             pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes,
@@ -264,7 +246,9 @@ impl App {
             latest_release_notes_available,
             update_dismissed: false,
             config_diagnostic,
+            session_diagnostic: session_diagnostics.current(),
             toast: None,
+            session_edits: session::SessionEditTracker::default(),
             prefix_code,
             prefix_mods,
             default_sidebar_width: config.ui.sidebar_width,
@@ -312,6 +296,25 @@ impl App {
                 .get(idx)
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
+        let (persistence_worker, persistence_status_rx) =
+            if let Some((persistence_status_tx, persistence_status_rx)) =
+                persistence_status_channels
+            {
+                (
+                    Some(crate::persist::PersistenceWorker::new(
+                        persistence_status_tx,
+                    )),
+                    Some(persistence_status_rx),
+                )
+            } else {
+                (None, None)
+            };
+        let session_persistence = SessionPersistenceController::new(
+            no_session,
+            config.session.autosave_interval_secs,
+            persistence_worker,
+            restore_outcome,
+        );
 
         Self {
             config_diagnostic_deadline: state
@@ -322,6 +325,7 @@ impl App {
             state,
             event_tx,
             event_rx,
+            persistence_status_rx,
             last_git_remote_status_refresh: Instant::now(),
             last_sidebar_divider_click: None,
             next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
@@ -333,7 +337,8 @@ impl App {
             api_rx,
             event_hub,
             last_focus,
-            no_session,
+            session_persistence,
+            session_diagnostics,
             input_rx: None,
             last_terminal_size: terminal::size().ok(),
             render_notify,
@@ -348,13 +353,18 @@ impl App {
         self.query_host_terminal_theme();
 
         let mut needs_render = true;
-
-        while !self.state.should_quit {
+        let run_result = loop {
+            if self.state.should_quit {
+                break Ok(());
+            }
             if self.render_dirty.load(Ordering::Acquire) {
                 needs_render = true;
             }
 
             // Drain internal events first so API reads observe fresh pane state.
+            if self.drain_persistence_events() {
+                needs_render = true;
+            }
             if self.drain_internal_events() {
                 needs_render = true;
             }
@@ -387,15 +397,19 @@ impl App {
                 needs_render = true;
             }
 
+            self.refresh_persistence_gate(Instant::now());
+
             let now = Instant::now();
             self.sync_animation_timer(now);
 
             if needs_render && self.can_render_now(now) {
                 self.render_dirty.swap(false, Ordering::AcqRel);
-                terminal.draw(|frame| {
+                if let Err(err) = terminal.draw(|frame| {
                     crate::ui::compute_view(&mut self.state, frame.area());
                     crate::ui::render(&self.state, frame);
-                })?;
+                }) {
+                    break Err(err);
+                }
                 self.last_render_at = Some(now);
                 needs_render = false;
                 continue;
@@ -412,6 +426,10 @@ impl App {
                     maybe_ev = self.event_rx.recv() => match maybe_ev {
                         Some(ev) => LoopEvent::Internal(ev),
                         None => LoopEvent::Timer,
+                    },
+                    maybe_persist_ev = recv_persistence_event_or_pending(self.persistence_status_rx.as_mut()) => match maybe_persist_ev {
+                        Some(ev) => LoopEvent::Internal(ev),
+                        None => LoopEvent::PersistenceClosed,
                     },
                     maybe_input = recv_raw_input_or_pending(input_rx) => match maybe_input {
                         Some(input) => LoopEvent::RawInput(input),
@@ -441,27 +459,37 @@ impl App {
                 LoopEvent::InputClosed => {
                     self.input_rx = None;
                 }
+                LoopEvent::PersistenceClosed => {
+                    self.persistence_status_rx = None;
+                }
                 LoopEvent::RenderRequested => {
                     if self.render_dirty.load(Ordering::Acquire) {
                         needs_render = true;
                     }
                 }
             }
-        }
+        };
 
-        // Save session on exit (skip in --no-session mode)
-        if !self.no_session && !self.state.workspaces.is_empty() {
-            let snap = crate::persist::capture(
-                &self.state.workspaces,
-                self.state.active,
-                self.state.selected,
-                self.state.agent_panel_scope,
-                self.state.sidebar_width,
-            );
-            crate::persist::save(&snap);
-        }
+        self.refresh_persistence_gate(Instant::now());
+        self.finish_run(run_result)
+    }
 
-        Ok(())
+    fn drain_persistence_events(&mut self) -> bool {
+        let mut had_event = false;
+        while let Some(rx) = self.persistence_status_rx.as_mut() {
+            match rx.try_recv() {
+                Ok(ev) => {
+                    had_event = true;
+                    self.handle_internal_event(ev);
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    self.persistence_status_rx = None;
+                    break;
+                }
+            }
+        }
+        had_event
     }
 
     fn drain_api_requests(&mut self) -> bool {
@@ -555,6 +583,44 @@ impl App {
         let _ = std::io::stdout().flush();
     }
 
+    fn capture_session_snapshot(&self) -> crate::persist::SessionSnapshot {
+        crate::persist::capture(
+            &self.state.workspaces,
+            self.state.active,
+            self.state.selected,
+            self.state.agent_panel_scope,
+            self.state.sidebar_width,
+        )
+    }
+
+    fn refresh_persistence_gate(&mut self, now: Instant) {
+        self.session_persistence
+            .arm_if_needed(now, self.state.has_persistence_relevant_mutation());
+    }
+
+    fn enqueue_session_persistence(&mut self) -> Option<u64> {
+        self.session_persistence
+            .enqueue_snapshot(self.capture_session_snapshot())
+    }
+
+    fn finalize_persistence(&mut self) -> io::Result<()> {
+        self.session_persistence
+            .finalize(Some(self.capture_session_snapshot()))
+    }
+
+    fn finish_run(&mut self, run_result: io::Result<()>) -> io::Result<()> {
+        let finalize_result = self.finalize_persistence();
+
+        match (run_result, finalize_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(run_err), Ok(())) => Err(run_err),
+            (Ok(()), Err(finalize_err)) => Err(finalize_err),
+            (Err(run_err), Err(finalize_err)) => Err(io::Error::other(format!(
+                "run failed: {run_err}; persistence finalization failed: {finalize_err}"
+            ))),
+        }
+    }
+
     fn apply_host_terminal_theme_to_panes(&self) {
         if self.state.host_terminal_theme.is_empty() {
             return;
@@ -635,6 +701,11 @@ impl App {
             self.run_auto_update_check();
         }
 
+        if self.session_persistence.autosave_due(now) {
+            let _ = self.enqueue_session_persistence();
+            self.session_persistence.reschedule_after_save_attempt(now);
+        }
+
         self.sync_animation_timer(now);
         changed
     }
@@ -706,6 +777,7 @@ impl App {
             self.next_animation_tick,
             self.git_refresh_deadline(),
             self.next_auto_update_check,
+            self.session_persistence.next_save_deadline(),
             render_deadline,
         ]
         .into_iter()
@@ -723,18 +795,47 @@ impl App {
     }
 
     fn handle_internal_event(&mut self, ev: AppEvent) {
-        if let AppEvent::PaneDied { pane_id } = &ev {
-            if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
-                if let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) {
-                    self.emit_event(crate::api::schema::EventEnvelope {
-                        event: crate::api::schema::EventKind::PaneExited,
-                        data: crate::api::schema::EventData::PaneExited {
-                            pane_id: public_pane_id,
-                            workspace_id: self.public_workspace_id(ws_idx),
-                        },
-                    });
+        match &ev {
+            AppEvent::ShutdownRequested => {
+                self.state.should_quit = true;
+                return;
+            }
+            AppEvent::ShutdownListenerFailed { error } => {
+                tracing::error!(error = %error, "shutdown listener failed");
+                self.session_diagnostics.shutdown_listener_failed(error);
+                self.sync_session_diagnostic();
+                return;
+            }
+            AppEvent::SessionPersistenceSucceeded { generation } => {
+                tracing::debug!(generation = *generation, "session persistence succeeded");
+                self.session_diagnostics.persistence_succeeded();
+                self.sync_session_diagnostic();
+                return;
+            }
+            AppEvent::SessionPersistenceFailed {
+                generation,
+                action,
+                error,
+            } => {
+                tracing::error!(generation = *generation, action = *action, error = %error, "session persistence failed");
+                self.session_diagnostics.persistence_failed(action, error);
+                self.sync_session_diagnostic();
+                return;
+            }
+            AppEvent::PaneDied { pane_id } => {
+                if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
+                    if let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) {
+                        self.emit_event(crate::api::schema::EventEnvelope {
+                            event: crate::api::schema::EventKind::PaneExited,
+                            data: crate::api::schema::EventData::PaneExited {
+                                pane_id: public_pane_id,
+                                workspace_id: self.public_workspace_id(ws_idx),
+                            },
+                        });
+                    }
                 }
             }
+            _ => {}
         }
 
         let released_agent = if let AppEvent::HookAgentReleased { pane_id, agent, .. } = &ev {
@@ -758,6 +859,10 @@ impl App {
             }
         }
         self.sync_toast_deadline(previous_toast);
+    }
+
+    fn sync_session_diagnostic(&mut self) {
+        self.state.session_diagnostic = self.session_diagnostics.current();
     }
 
     fn emit_pane_state_update(&self, update: &crate::app::actions::PaneStateUpdate) {
@@ -1089,7 +1194,7 @@ impl App {
                     })
                     .unwrap();
                 };
-                let Some(ws) = self.state.workspaces.get_mut(index) else {
+                if self.state.workspaces.get(index).is_none() {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
@@ -1098,8 +1203,11 @@ impl App {
                         },
                     })
                     .unwrap();
-                };
-                ws.set_custom_name(params.label.clone());
+                }
+                self.state.mark_persistence_relevant_mutation();
+                if let Some(ws) = self.state.workspaces.get_mut(index) {
+                    ws.set_custom_name(params.label.clone());
+                }
                 self.emit_event(crate::api::schema::EventEnvelope {
                     event: crate::api::schema::EventKind::WorkspaceRenamed,
                     data: crate::api::schema::EventData::WorkspaceRenamed {
@@ -1269,6 +1377,7 @@ impl App {
                     });
                 match result {
                     Ok(tab_idx) => {
+                        self.state.mark_persistence_relevant_mutation();
                         if params.focus {
                             self.state.switch_workspace(ws_idx);
                             if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
@@ -1345,12 +1454,13 @@ impl App {
                     })
                     .unwrap();
                 };
-                let Some(tab) = self
+                if self
                     .state
                     .workspaces
-                    .get_mut(ws_idx)
-                    .and_then(|ws| ws.tabs.get_mut(tab_idx))
-                else {
+                    .get(ws_idx)
+                    .and_then(|ws| ws.tabs.get(tab_idx))
+                    .is_none()
+                {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
@@ -1359,8 +1469,16 @@ impl App {
                         },
                     })
                     .unwrap();
-                };
-                tab.set_custom_name(params.label.clone());
+                }
+                self.state.mark_persistence_relevant_mutation();
+                if let Some(tab) = self
+                    .state
+                    .workspaces
+                    .get_mut(ws_idx)
+                    .and_then(|ws| ws.tabs.get_mut(tab_idx))
+                {
+                    tab.set_custom_name(params.label.clone());
+                }
                 self.emit_event(crate::api::schema::EventEnvelope {
                     event: crate::api::schema::EventKind::TabRenamed,
                     data: crate::api::schema::EventData::TabRenamed {
@@ -1416,6 +1534,7 @@ impl App {
                     })
                     .unwrap();
                 }
+                self.state.mark_persistence_relevant_mutation();
                 self.emit_event(crate::api::schema::EventEnvelope {
                     event: crate::api::schema::EventKind::TabClosed,
                     data: crate::api::schema::EventData::TabClosed {
@@ -1483,6 +1602,7 @@ impl App {
                 if !params.focus {
                     ws.layout.focus_pane(target_pane_id);
                 }
+                self.state.mark_persistence_relevant_mutation();
                 let pane = self.pane_info(ws_idx, new_pane_id).unwrap();
                 self.emit_event(crate::api::schema::EventEnvelope {
                     event: crate::api::schema::EventKind::PaneCreated,
@@ -1757,6 +1877,7 @@ impl App {
                             workspace_id,
                         },
                     });
+                    self.state.mark_persistence_relevant_mutation();
                 }
                 SuccessResponse {
                     id: request.id,
@@ -1971,10 +2092,10 @@ impl App {
         match self.create_tab_with_options(initial_cwd, true) {
             Ok(tab_idx) => {
                 if let Some(name) = custom_name {
-                    if let Some(ws) = self
-                        .state
-                        .active
-                        .and_then(|ws_idx| self.state.workspaces.get_mut(ws_idx))
+                    let active_ws_idx = self.state.active;
+                    self.state.mark_persistence_relevant_mutation();
+                    if let Some(ws) =
+                        active_ws_idx.and_then(|ws_idx| self.state.workspaces.get_mut(ws_idx))
                     {
                         if let Some(tab) = ws.tabs.get_mut(tab_idx) {
                             tab.set_custom_name(name);
@@ -1997,16 +2118,21 @@ impl App {
             return self.create_workspace_with_options(initial_cwd, focus);
         };
         let (rows, cols) = self.state.estimate_pane_size();
-        let ws = &mut self.state.workspaces[ws_idx];
-        let idx = ws.create_tab(
-            rows,
-            cols,
-            initial_cwd,
-            self.state.pane_scrollback_limit_bytes,
-            self.state.host_terminal_theme,
-        )?;
+        let idx = {
+            let ws = &mut self.state.workspaces[ws_idx];
+            ws.create_tab(
+                rows,
+                cols,
+                initial_cwd,
+                self.state.pane_scrollback_limit_bytes,
+                self.state.host_terminal_theme,
+            )?
+        };
+        self.state.mark_persistence_relevant_mutation();
         if focus {
-            ws.switch_tab(idx);
+            if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
+                ws.switch_tab(idx);
+            }
             self.state.mode = Mode::Terminal;
         }
         Ok(idx)
@@ -2030,6 +2156,7 @@ impl App {
         )?;
         ws.refresh_git_ahead_behind();
         self.state.workspaces.push(ws);
+        self.state.mark_persistence_relevant_mutation();
         let idx = self.state.workspaces.len() - 1;
         if focus || self.state.active.is_none() {
             self.state.switch_workspace(idx);
@@ -2285,6 +2412,15 @@ mod tests {
         )
     }
 
+    fn enable_partial_restore_persistence(app: &mut App, interval_secs: u64) {
+        app.session_persistence = SessionPersistenceController::new(
+            false,
+            interval_secs,
+            None,
+            session::RestoreOutcome::PartialRestore,
+        );
+    }
+
     #[tokio::test]
     async fn raw_input_waits_when_reader_is_gone() {
         let result =
@@ -2480,5 +2616,194 @@ mod tests {
             AgentState::Idle,
             "Working→Idle should still apply after temporary queue pressure"
         );
+    }
+
+    #[test]
+    fn shutdown_requested_sets_should_quit() {
+        let mut app = test_app();
+        app.handle_internal_event(AppEvent::ShutdownRequested);
+        assert!(app.state.should_quit);
+    }
+
+    #[test]
+    fn structural_session_change_arms_persistence_after_partial_restore() {
+        let mut app = test_app();
+        enable_partial_restore_persistence(&mut app, 10);
+        app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
+
+        app.state.move_workspace(0, app.state.workspaces.len());
+        app.refresh_persistence_gate(Instant::now());
+
+        assert!(app.session_persistence.is_armed());
+        assert!(app.session_persistence.next_save_deadline().is_some());
+    }
+
+    #[test]
+    fn focus_change_does_not_arm_persistence_after_partial_restore() {
+        let mut app = test_app();
+        enable_partial_restore_persistence(&mut app, 60);
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        let second_pane =
+            app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+
+        let tab = &mut app.state.workspaces[0].tabs[0];
+        tab.layout.focus_pane(second_pane);
+        app.refresh_persistence_gate(Instant::now());
+
+        assert!(!app.session_persistence.is_armed());
+    }
+
+    #[test]
+    fn ratio_only_resize_arms_persistence_after_partial_restore() {
+        let mut app = test_app();
+        enable_partial_restore_persistence(&mut app, 60);
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+
+        app.state.resize_pane(crate::layout::NavDirection::Right);
+        app.refresh_persistence_gate(Instant::now());
+
+        assert!(app.session_persistence.is_armed());
+        assert!(app.session_persistence.next_save_deadline().is_some());
+    }
+
+    #[test]
+    fn changing_agent_panel_scope_does_not_arm_persistence_after_partial_restore() {
+        let mut app = test_app();
+        enable_partial_restore_persistence(&mut app, 60);
+        app.state.workspaces = vec![Workspace::test_new("test")];
+
+        app.state.agent_panel_scope = crate::app::state::AgentPanelScope::AllWorkspaces;
+        app.refresh_persistence_gate(Instant::now());
+
+        assert!(!app.session_persistence.is_armed());
+        assert!(app.session_persistence.next_save_deadline().is_none());
+    }
+
+    #[test]
+    fn changing_sidebar_width_does_not_arm_persistence_after_partial_restore() {
+        let mut app = test_app();
+        enable_partial_restore_persistence(&mut app, 60);
+        app.state.workspaces = vec![Workspace::test_new("test")];
+
+        app.state.sidebar_width += 1;
+        app.refresh_persistence_gate(Instant::now());
+
+        assert!(!app.session_persistence.is_armed());
+        assert!(app.session_persistence.next_save_deadline().is_none());
+    }
+
+    #[test]
+    fn reverted_structural_edit_still_arms_persistence_after_partial_restore() {
+        let mut app = test_app();
+        enable_partial_restore_persistence(&mut app, 60);
+        app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
+        let original_ids: Vec<_> = app
+            .state
+            .workspaces
+            .iter()
+            .map(|ws| ws.id.clone())
+            .collect();
+
+        app.state.move_workspace(0, app.state.workspaces.len());
+        app.state.move_workspace(1, 0);
+        assert_eq!(
+            app.state
+                .workspaces
+                .iter()
+                .map(|ws| ws.id.clone())
+                .collect::<Vec<_>>(),
+            original_ids
+        );
+
+        app.refresh_persistence_gate(Instant::now());
+
+        assert!(app.session_persistence.is_armed());
+        assert!(app.session_persistence.next_save_deadline().is_some());
+    }
+
+    #[tokio::test]
+    async fn persistence_event_waits_when_receiver_is_absent() {
+        let result = tokio::time::timeout(
+            Duration::from_millis(20),
+            recv_persistence_event_or_pending(None),
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn background_pane_exit_does_not_arm_persistence_after_partial_restore() {
+        let mut app = test_app();
+        enable_partial_restore_persistence(&mut app, 60);
+        let ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        app.handle_internal_event(AppEvent::PaneDied { pane_id });
+        app.refresh_persistence_gate(Instant::now());
+
+        assert!(!app.session_persistence.is_armed());
+        assert!(app.session_persistence.next_save_deadline().is_none());
+    }
+
+    #[test]
+    fn shutdown_listener_failure_updates_session_diagnostic() {
+        let mut app = test_app();
+
+        app.handle_internal_event(AppEvent::ShutdownListenerFailed {
+            error: "registration failed".to_string(),
+        });
+
+        assert_eq!(
+            app.state.session_diagnostic.as_deref(),
+            Some("graceful shutdown persistence unavailable: registration failed")
+        );
+    }
+
+    #[test]
+    fn persistence_success_preserves_shutdown_listener_diagnostic() {
+        let mut app = test_app();
+
+        app.handle_internal_event(AppEvent::ShutdownListenerFailed {
+            error: "registration failed".to_string(),
+        });
+        app.handle_internal_event(AppEvent::SessionPersistenceFailed {
+            generation: 1,
+            action: "save session",
+            error: "disk full".to_string(),
+        });
+        assert_eq!(
+            app.state.session_diagnostic.as_deref(),
+            Some("save session failed: disk full")
+        );
+
+        app.handle_internal_event(AppEvent::SessionPersistenceSucceeded { generation: 2 });
+        assert_eq!(
+            app.state.session_diagnostic.as_deref(),
+            Some("graceful shutdown persistence unavailable: registration failed")
+        );
+    }
+
+    #[test]
+    fn persistence_success_clears_persistence_diagnostic_when_no_shutdown_warning_remains() {
+        let mut app = test_app();
+
+        app.handle_internal_event(AppEvent::SessionPersistenceFailed {
+            generation: 1,
+            action: "save session",
+            error: "disk full".to_string(),
+        });
+        assert_eq!(
+            app.state.session_diagnostic.as_deref(),
+            Some("save session failed: disk full")
+        );
+
+        app.handle_internal_event(AppEvent::SessionPersistenceSucceeded { generation: 2 });
+        assert_eq!(app.state.session_diagnostic, None);
     }
 }

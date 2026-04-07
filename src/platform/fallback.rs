@@ -24,3 +24,10 @@ pub fn signal_processes(_pids: &[u32], _signal: Signal) {}
 pub fn process_exists(_pid: u32) -> bool {
     false
 }
+
+pub async fn wait_for_shutdown_request() -> std::io::Result<()> {
+    // Unsupported platforms have no reliable app-level shutdown hook yet.
+    // Do not intercept process-level Ctrl-C here; that must keep reaching the
+    // foreground program running inside the pane.
+    std::future::pending::<std::io::Result<()>>().await
+}

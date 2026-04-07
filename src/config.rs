@@ -41,6 +41,7 @@ pub struct Config {
     pub keys: KeysConfig,
     pub ui: UiConfig,
     pub advanced: AdvancedConfig,
+    pub session: SessionConfig,
 }
 
 /// Theme configuration: pick a built-in or override individual tokens.
@@ -160,6 +161,13 @@ pub struct AdvancedConfig {
     /// Maximum scrollback buffer size in bytes retained per pane terminal. Default: 10000000.
     #[serde(alias = "scrollback_lines")]
     pub scrollback_limit_bytes: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct SessionConfig {
+    /// Periodic session autosave interval in seconds. Set to 0 to disable.
+    pub autosave_interval_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -346,6 +354,14 @@ impl Default for AdvancedConfig {
         Self {
             allow_nested: false,
             scrollback_limit_bytes: DEFAULT_SCROLLBACK_LIMIT_BYTES,
+        }
+    }
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            autosave_interval_secs: 60,
         }
     }
 }
@@ -954,6 +970,31 @@ fn parse_key_combo(s: &str) -> Option<(KeyCode, KeyModifiers)> {
             if ch.is_ascii_uppercase() {
                 modifiers |= KeyModifiers::SHIFT;
                 KeyCode::Char(ch.to_ascii_lowercase())
+            } else if matches!(
+                ch,
+                '!' | '@'
+                    | '#'
+                    | '$'
+                    | '%'
+                    | '^'
+                    | '&'
+                    | '*'
+                    | '('
+                    | ')'
+                    | '_'
+                    | '+'
+                    | '{'
+                    | '}'
+                    | '|'
+                    | ':'
+                    | '"'
+                    | '<'
+                    | '>'
+                    | '?'
+                    | '~'
+            ) {
+                modifiers |= KeyModifiers::SHIFT;
+                KeyCode::Char(ch)
             } else {
                 KeyCode::Char(ch)
             }
@@ -1090,6 +1131,14 @@ mod tests {
         assert_eq!(
             parse_key_combo("ctrl+`"),
             Some((KeyCode::Char('`'), KeyModifiers::CONTROL))
+        );
+        assert_eq!(
+            parse_key_combo("{"),
+            Some((KeyCode::Char('{'), KeyModifiers::SHIFT))
+        );
+        assert_eq!(
+            parse_key_combo("?"),
+            Some((KeyCode::Char('?'), KeyModifiers::SHIFT))
         );
     }
 
@@ -1231,6 +1280,43 @@ enabled = true
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.ui.toast.enabled);
+    }
+
+    #[test]
+    fn session_config_defaults_to_sixty_seconds() {
+        let config = Config::default();
+        assert_eq!(config.session.autosave_interval_secs, 60);
+    }
+
+    #[test]
+    fn missing_session_section_keeps_existing_config_compatible() {
+        let toml = r#"
+[ui]
+sidebar_width = 31
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.sidebar_width, 31);
+        assert_eq!(config.session.autosave_interval_secs, 60);
+    }
+
+    #[test]
+    fn session_config_parses_explicit_interval() {
+        let toml = r#"
+[session]
+autosave_interval_secs = 42
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.session.autosave_interval_secs, 42);
+    }
+
+    #[test]
+    fn session_config_parses_zero_to_disable_autosave() {
+        let toml = r#"
+[session]
+autosave_interval_secs = 0
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.session.autosave_interval_secs, 0);
     }
 
     #[test]

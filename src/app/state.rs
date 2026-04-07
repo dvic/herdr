@@ -591,7 +591,9 @@ pub struct AppState {
     pub latest_release_notes_available: bool,
     pub update_dismissed: bool,
     pub config_diagnostic: Option<String>,
+    pub session_diagnostic: Option<String>,
     pub toast: Option<ToastNotification>,
+    pub(crate) session_edits: super::session::SessionEditTracker,
     // Config
     pub prefix_code: KeyCode,
     pub prefix_mods: KeyModifiers,
@@ -622,6 +624,14 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub(crate) fn mark_persistence_relevant_mutation(&mut self) {
+        self.session_edits.mark_authoritative_change();
+    }
+
+    pub(crate) fn has_persistence_relevant_mutation(&self) -> bool {
+        self.session_edits.has_authoritative_change()
+    }
+
     pub fn sound_enabled(&self) -> bool {
         self.sound.enabled
     }
@@ -702,7 +712,9 @@ impl AppState {
             latest_release_notes_available: false,
             update_dismissed: false,
             config_diagnostic: None,
+            session_diagnostic: None,
             toast: None,
+            session_edits: super::session::SessionEditTracker::default(),
             prefix_code: KeyCode::Char('b'),
             prefix_mods: KeyModifiers::CONTROL,
             default_sidebar_width: 26,

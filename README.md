@@ -240,7 +240,18 @@ for all keybindings, onboarding, notification, sound, ui options, and environmen
 
 ## session persistence
 
-herdr saves your workspaces, tabs, pane layouts, pane working directories, and focused tab/pane on exit. when you restart, everything is restored. sessions are stored at `~/.config/herdr/session.json`.
+herdr saves your workspaces, tabs, pane layouts, pane working directories, and focused tab/pane. it always saves on normal exit, and it autosaves periodically by default every 60 seconds so terminal/window closes lose less state. sessions are stored at `~/.config/herdr/session.json`.
+
+restore recreates fresh shells in the saved working directories. it does **not** restore running programs, terminal scrollback, ssh/vim/ncurses state, or full PTY process state.
+
+terminal/window close recovery is best-effort. graceful closes that deliver signals like `SIGHUP`, `SIGTERM`, or `SIGINT` should persist; hard kills/crashes/power loss cannot be guaranteed.
+
+configure autosave with:
+
+```toml
+[session]
+autosave_interval_secs = 60 # set to 0 to disable periodic autosave
+```
 
 through the socket api, tabs are first-class too now. raw integrations and cli wrappers can list/create/focus/rename/close tabs directly while pane ids stay workspace-scoped.
 
