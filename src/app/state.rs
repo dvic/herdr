@@ -593,7 +593,7 @@ pub struct AppState {
     pub config_diagnostic: Option<String>,
     pub session_diagnostic: Option<String>,
     pub toast: Option<ToastNotification>,
-    pub(crate) persistence_relevant_mutation: bool,
+    pub(crate) session_edits: super::session::SessionEditTracker,
     // Config
     pub prefix_code: KeyCode,
     pub prefix_mods: KeyModifiers,
@@ -625,7 +625,11 @@ pub struct AppState {
 
 impl AppState {
     pub(crate) fn mark_persistence_relevant_mutation(&mut self) {
-        self.persistence_relevant_mutation = true;
+        self.session_edits.mark_authoritative_change();
+    }
+
+    pub(crate) fn has_persistence_relevant_mutation(&self) -> bool {
+        self.session_edits.has_authoritative_change()
     }
 
     pub fn sound_enabled(&self) -> bool {
@@ -748,7 +752,7 @@ impl AppState {
             config_diagnostic: None,
             session_diagnostic: None,
             toast: None,
-            persistence_relevant_mutation: false,
+            session_edits: super::session::SessionEditTracker::default(),
             prefix_code: KeyCode::Char('b'),
             prefix_mods: KeyModifiers::CONTROL,
             default_sidebar_width: 26,
