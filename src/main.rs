@@ -380,7 +380,13 @@ fn main() -> io::Result<()> {
                         .send(crate::events::AppEvent::ShutdownRequested)
                         .await;
                 }
-                Err(err) => tracing::error!(err = %err, "failed to subscribe to shutdown signals"),
+                Err(err) => {
+                    let _ = shutdown_tx
+                        .send(crate::events::AppEvent::ShutdownListenerFailed {
+                            error: err.to_string(),
+                        })
+                        .await;
+                }
             }
         });
         let result = app.run(&mut terminal).await;
