@@ -40,7 +40,7 @@ pub struct App {
     pub event_tx: mpsc::Sender<AppEvent>,
     event_rx: mpsc::Receiver<AppEvent>,
     api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
-    persistence_status_rx: tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    persistence_status_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
     event_hub: crate::api::EventHub,
     last_focus: Option<(usize, crate::layout::PaneId)>,
     no_session: bool,
@@ -77,8 +77,6 @@ enum RestoreOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionStructureFingerprint {
     workspaces: Vec<WorkspaceStructureFingerprint>,
-    agent_panel_scope: state::AgentPanelScope,
-    sidebar_width: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +110,7 @@ enum LoopEvent {
     Api(crate::api::ApiRequestMessage),
     RawInput(crate::raw_input::RawInputEvent),
     InputClosed,
+    PersistenceClosed,
     RenderRequested,
 }
 
@@ -119,6 +118,15 @@ async fn recv_raw_input_or_pending(
     input_rx: Option<&mut mpsc::Receiver<crate::raw_input::RawInputEvent>>,
 ) -> Option<crate::raw_input::RawInputEvent> {
     match input_rx {
+        Some(rx) => rx.recv().await,
+        None => pending().await,
+    }
+}
+
+async fn recv_persistence_event_or_pending(
+    persistence_status_rx: Option<&mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
+) -> Option<AppEvent> {
+    match persistence_status_rx {
         Some(rx) => rx.recv().await,
         None => pending().await,
     }
@@ -176,11 +184,7 @@ fn layout_structure_fingerprint(node: &crate::layout::Node) -> LayoutStructureFi
     }
 }
 
-fn session_structure_fingerprint(
-    workspaces: &[Workspace],
-    agent_panel_scope: state::AgentPanelScope,
-    sidebar_width: u16,
-) -> SessionStructureFingerprint {
+fn session_structure_fingerprint(workspaces: &[Workspace]) -> SessionStructureFingerprint {
     SessionStructureFingerprint {
         workspaces: workspaces
             .iter()
@@ -198,8 +202,6 @@ fn session_structure_fingerprint(
                     .collect(),
             })
             .collect(),
-        agent_panel_scope,
-        sidebar_width,
     }
 }
 
@@ -245,7 +247,8 @@ impl App {
     ) -> Self {
         let (prefix_code, prefix_mods) = config.prefix_key();
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(64);
-        let (persistence_status_tx, persistence_status_rx) = tokio::sync::mpsc::unbounded_channel();
+        let persistence_status_channels =
+            (!no_session).then(tokio::sync::mpsc::unbounded_channel::<AppEvent>);
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(AtomicBool::new(false));
 
@@ -473,11 +476,7 @@ impl App {
                 .get(idx)
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
-        let startup_session_structure = session_structure_fingerprint(
-            &state.workspaces,
-            state.agent_panel_scope,
-            state.sidebar_width,
-        );
+        let startup_session_structure = session_structure_fingerprint(&state.workspaces);
         let persistence_armed = !no_session
             && matches!(
                 restore_outcome,
@@ -490,8 +489,19 @@ impl App {
         } else {
             None
         };
-        let persistence_worker =
-            (!no_session).then(|| crate::persist::PersistenceWorker::new(persistence_status_tx));
+        let (persistence_worker, persistence_status_rx) =
+            if let Some((persistence_status_tx, persistence_status_rx)) =
+                persistence_status_channels
+            {
+                (
+                    Some(crate::persist::PersistenceWorker::new(
+                        persistence_status_tx,
+                    )),
+                    Some(persistence_status_rx),
+                )
+            } else {
+                (None, None)
+            };
 
         Self {
             config_diagnostic_deadline: state
@@ -605,9 +615,9 @@ impl App {
                         Some(ev) => LoopEvent::Internal(ev),
                         None => LoopEvent::Timer,
                     },
-                    maybe_persist_ev = self.persistence_status_rx.recv() => match maybe_persist_ev {
+                    maybe_persist_ev = recv_persistence_event_or_pending(self.persistence_status_rx.as_mut()) => match maybe_persist_ev {
                         Some(ev) => LoopEvent::Internal(ev),
-                        None => LoopEvent::Timer,
+                        None => LoopEvent::PersistenceClosed,
                     },
                     maybe_input = recv_raw_input_or_pending(input_rx) => match maybe_input {
                         Some(input) => LoopEvent::RawInput(input),
@@ -637,6 +647,9 @@ impl App {
                 LoopEvent::InputClosed => {
                     self.input_rx = None;
                 }
+                LoopEvent::PersistenceClosed => {
+                    self.persistence_status_rx = None;
+                }
                 LoopEvent::RenderRequested => {
                     if self.render_dirty.load(Ordering::Acquire) {
                         needs_render = true;
@@ -653,9 +666,18 @@ impl App {
 
     fn drain_persistence_events(&mut self) -> bool {
         let mut had_event = false;
-        while let Ok(ev) = self.persistence_status_rx.try_recv() {
-            had_event = true;
-            self.handle_internal_event(ev);
+        while let Some(rx) = self.persistence_status_rx.as_mut() {
+            match rx.try_recv() {
+                Ok(ev) => {
+                    had_event = true;
+                    self.handle_internal_event(ev);
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    self.persistence_status_rx = None;
+                    break;
+                }
+            }
         }
         had_event
     }
@@ -766,12 +788,7 @@ impl App {
             return;
         }
 
-        if session_structure_fingerprint(
-            &self.state.workspaces,
-            self.state.agent_panel_scope,
-            self.state.sidebar_width,
-        ) != self.startup_session_structure
-        {
+        if session_structure_fingerprint(&self.state.workspaces) != self.startup_session_structure {
             info!(restore_outcome = ?self.restore_outcome, "session persistence armed after structural change");
             self.persistence_armed = true;
             if self.next_session_save.is_none() {
@@ -990,6 +1007,13 @@ impl App {
         match &ev {
             AppEvent::ShutdownRequested => {
                 self.state.should_quit = true;
+                return;
+            }
+            AppEvent::ShutdownListenerFailed { error } => {
+                tracing::error!(error = %error, "shutdown listener failed");
+                self.state.session_diagnostic = Some(format!(
+                    "graceful shutdown persistence unavailable: {error}"
+                ));
                 return;
             }
             AppEvent::SessionPersistenceSucceeded { generation } => {
@@ -2782,11 +2806,7 @@ mod tests {
         app.persistence_armed = false;
         app.session_autosave_interval = Some(Duration::from_secs(10));
         app.state.workspaces = vec![Workspace::test_new("test")];
-        app.startup_session_structure = session_structure_fingerprint(
-            &app.state.workspaces,
-            app.state.agent_panel_scope,
-            app.state.sidebar_width,
-        );
+        app.startup_session_structure = session_structure_fingerprint(&app.state.workspaces);
 
         app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
         app.refresh_persistence_gate(Instant::now());
@@ -2804,11 +2824,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("test")];
         let second_pane =
             app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
-        app.startup_session_structure = session_structure_fingerprint(
-            &app.state.workspaces,
-            app.state.agent_panel_scope,
-            app.state.sidebar_width,
-        );
+        app.startup_session_structure = session_structure_fingerprint(&app.state.workspaces);
 
         let tab = &mut app.state.workspaces[0].tabs[0];
         tab.layout.focus_pane(second_pane);
@@ -2826,11 +2842,7 @@ mod tests {
         app.session_autosave_interval = Some(Duration::from_secs(60));
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
-        app.startup_session_structure = session_structure_fingerprint(
-            &app.state.workspaces,
-            app.state.agent_panel_scope,
-            app.state.sidebar_width,
-        );
+        app.startup_session_structure = session_structure_fingerprint(&app.state.workspaces);
 
         app.state.workspaces[0].tabs[0]
             .layout
@@ -2842,45 +2854,61 @@ mod tests {
     }
 
     #[test]
-    fn changing_agent_panel_scope_arms_persistence_after_partial_restore() {
+    fn changing_agent_panel_scope_does_not_arm_persistence_after_partial_restore() {
         let mut app = test_app();
         app.no_session = false;
         app.restore_outcome = RestoreOutcome::PartialRestore;
         app.persistence_armed = false;
         app.session_autosave_interval = Some(Duration::from_secs(60));
         app.state.workspaces = vec![Workspace::test_new("test")];
-        app.startup_session_structure = session_structure_fingerprint(
-            &app.state.workspaces,
-            app.state.agent_panel_scope,
-            app.state.sidebar_width,
-        );
+        app.startup_session_structure = session_structure_fingerprint(&app.state.workspaces);
 
         app.state.agent_panel_scope = crate::app::state::AgentPanelScope::AllWorkspaces;
         app.refresh_persistence_gate(Instant::now());
 
-        assert!(app.persistence_armed);
-        assert!(app.next_session_save.is_some());
+        assert!(!app.persistence_armed);
+        assert!(app.next_session_save.is_none());
     }
 
     #[test]
-    fn changing_sidebar_width_arms_persistence_after_partial_restore() {
+    fn changing_sidebar_width_does_not_arm_persistence_after_partial_restore() {
         let mut app = test_app();
         app.no_session = false;
         app.restore_outcome = RestoreOutcome::PartialRestore;
         app.persistence_armed = false;
         app.session_autosave_interval = Some(Duration::from_secs(60));
         app.state.workspaces = vec![Workspace::test_new("test")];
-        app.startup_session_structure = session_structure_fingerprint(
-            &app.state.workspaces,
-            app.state.agent_panel_scope,
-            app.state.sidebar_width,
-        );
+        app.startup_session_structure = session_structure_fingerprint(&app.state.workspaces);
 
         app.state.sidebar_width += 1;
         app.refresh_persistence_gate(Instant::now());
 
-        assert!(app.persistence_armed);
-        assert!(app.next_session_save.is_some());
+        assert!(!app.persistence_armed);
+        assert!(app.next_session_save.is_none());
+    }
+
+    #[tokio::test]
+    async fn persistence_event_waits_when_receiver_is_absent() {
+        let result = tokio::time::timeout(
+            Duration::from_millis(20),
+            recv_persistence_event_or_pending(None),
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn shutdown_listener_failure_updates_session_diagnostic() {
+        let mut app = test_app();
+
+        app.handle_internal_event(AppEvent::ShutdownListenerFailed {
+            error: "registration failed".to_string(),
+        });
+
+        assert_eq!(
+            app.state.session_diagnostic.as_deref(),
+            Some("graceful shutdown persistence unavailable: registration failed")
+        );
     }
 
     #[test]

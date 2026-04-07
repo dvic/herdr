@@ -40,6 +40,8 @@ pub enum AppEvent {
     UpdateReady { version: String },
     /// Host terminal/window requested graceful shutdown.
     ShutdownRequested,
+    /// Failed to install the shutdown listener.
+    ShutdownListenerFailed { error: String },
     /// Session persistence completed successfully.
     SessionPersistenceSucceeded { generation: u64 },
     /// Session persistence failed.

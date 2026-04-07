@@ -425,6 +425,7 @@ impl AppState {
                 .into_iter()
                 .collect(),
             AppEvent::ShutdownRequested
+            | AppEvent::ShutdownListenerFailed { .. }
             | AppEvent::SessionPersistenceSucceeded { .. }
             | AppEvent::SessionPersistenceFailed { .. } => Vec::new(),
         }
