@@ -40,6 +40,16 @@ fn is_modifier_only_key(code: &KeyCode) -> bool {
     matches!(code, KeyCode::Modifier(_))
 }
 
+fn normalized_key_event(key: TerminalKey) -> KeyEvent {
+    let code = match (key.code, key.shifted_codepoint.and_then(char::from_u32)) {
+        (KeyCode::Char(_), Some(shifted)) => KeyCode::Char(shifted),
+        (code, None) => code,
+        (code, Some(_)) => code,
+    };
+
+    KeyEvent::new_with_kind(code, key.modifiers, key.kind)
+}
+
 fn terminal_direct_navigation_action(state: &AppState, key: &KeyEvent) -> Option<NavigateAction> {
     let kb = &state.keybinds;
     if kb
@@ -98,7 +108,7 @@ impl App {
         match self.state.mode {
             Mode::Terminal => self.handle_terminal_key(key).await,
             _ => {
-                let key = key.as_key_event();
+                let key = normalized_key_event(key);
                 match self.state.mode {
                     Mode::Onboarding => self.handle_onboarding_key(key),
                     Mode::ReleaseNotes => self.handle_release_notes_key(key),
@@ -338,7 +348,7 @@ impl App {
         self.state.clear_selection();
         self.state.update_dismissed = true;
 
-        let key_event = key.as_key_event();
+        let key_event = normalized_key_event(key);
 
         if let Some(action) = terminal_direct_navigation_action(&self.state, &key_event) {
             debug!(
@@ -3094,6 +3104,23 @@ mod tests {
         assert_eq!(state.mode, Mode::KeybindHelp);
     }
 
+    #[tokio::test]
+    async fn shifted_kitty_question_mark_opens_keybind_help_from_navigate() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Navigate;
+
+        app.handle_key(
+            TerminalKey::new(KeyCode::Char('/'), KeyModifiers::SHIFT)
+                .with_shifted_codepoint('?' as u32),
+        )
+        .await;
+
+        assert_eq!(app.state.mode, Mode::KeybindHelp);
+    }
+
     #[test]
     fn rename_modal_keyboard_and_mouse_share_actions() {
         let mut state = state_with_workspaces(&["test"]);
@@ -3158,6 +3185,20 @@ mod tests {
             KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty()),
         );
         assert_eq!(state.name_input, "ne");
+    }
+
+    #[tokio::test]
+    async fn shifted_kitty_letter_uses_shifted_character_in_rename_modal() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::RenameWorkspace;
+
+        app.handle_key(
+            TerminalKey::new(KeyCode::Char('n'), KeyModifiers::SHIFT)
+                .with_shifted_codepoint('N' as u32),
+        )
+        .await;
+
+        assert_eq!(app.state.name_input, "N");
     }
 
     #[test]
