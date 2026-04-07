@@ -24,3 +24,7 @@ pub fn signal_processes(_pids: &[u32], _signal: Signal) {}
 pub fn process_exists(_pid: u32) -> bool {
     false
 }
+
+pub async fn wait_for_shutdown_request() -> std::io::Result<()> {
+    tokio::signal::ctrl_c().await
+}

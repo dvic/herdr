@@ -293,16 +293,37 @@ pub fn render(app: &AppState, frame: &mut Frame) {
     }
 
     // Notifications (rendered on top of everything)
-    let has_config_diagnostic = app.config_diagnostic.is_some();
+    let mut top_diagnostic_rows = 0;
     if let Some(message) = &app.config_diagnostic {
-        render_config_diagnostic(frame, terminal_area, message, &app.palette);
+        render_top_diagnostic(
+            frame,
+            terminal_area,
+            top_diagnostic_rows,
+            "config warning",
+            message,
+            app.palette.panel_bg,
+            app.palette.yellow,
+        );
+        top_diagnostic_rows += 1;
+    }
+    if let Some(message) = &app.session_diagnostic {
+        render_top_diagnostic(
+            frame,
+            terminal_area,
+            top_diagnostic_rows,
+            "session warning",
+            message,
+            app.palette.text,
+            app.palette.red,
+        );
+        top_diagnostic_rows += 1;
     }
     if let Some(toast) = &app.toast {
         render_toast_notification(
             frame,
             terminal_area,
             toast,
-            has_config_diagnostic,
+            top_diagnostic_rows,
             &app.palette,
         );
     }
@@ -2804,7 +2825,7 @@ fn render_toast_notification(
     frame: &mut Frame,
     area: Rect,
     toast: &ToastNotification,
-    offset_for_warning: bool,
+    top_offset_rows: u16,
     p: &Palette,
 ) {
     let dot_color = match toast.kind {
@@ -2816,10 +2837,7 @@ fn render_toast_notification(
     let width = content_width.saturating_add(2).min(area.width);
     let height = 4u16.min(area.height);
     let x = area.x + area.width.saturating_sub(width);
-    let y = area.y
-        + area
-            .height
-            .saturating_sub(height + if offset_for_warning { 1 } else { 0 });
+    let y = area.y + area.height.saturating_sub(height + top_offset_rows);
     let toast_area = Rect::new(x, y, width, height);
 
     frame.render_widget(Clear, toast_area);
@@ -2866,12 +2884,20 @@ fn render_toast_notification(
 ///
 /// Filled dot = needs attention (blocked/working, or finished unseen).
 /// Hollow dot = nothing to do here.
-fn render_config_diagnostic(frame: &mut Frame, area: Rect, message: &str, p: &Palette) {
-    let text = format!(" config warning: {message} ");
+fn render_top_diagnostic(
+    frame: &mut Frame,
+    area: Rect,
+    row_offset: u16,
+    label: &str,
+    message: &str,
+    fg: Color,
+    bg: Color,
+) {
+    let text = format!(" {label}: {message} ");
     let width = text.len() as u16 + 2;
     let notif_area = Rect::new(
         area.x + area.width.saturating_sub(width.min(area.width)),
-        area.y,
+        area.y.saturating_add(row_offset),
         width.min(area.width),
         1,
     );
@@ -2880,10 +2906,7 @@ fn render_config_diagnostic(frame: &mut Frame, area: Rect, message: &str, p: &Pa
     frame.render_widget(
         Paragraph::new(Span::styled(
             text,
-            Style::default()
-                .fg(p.panel_bg)
-                .bg(p.yellow)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
         )),
         notif_area,
     );

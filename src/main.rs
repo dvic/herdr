@@ -154,6 +154,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Maximum scrollback buffer size in bytes retained per pane terminal.
 # Matches Ghostty's default scrollback-limit behavior.
 # scrollback_limit_bytes = 10000000
+
+[session]
+# Periodic autosave interval in seconds. Set to 0 to disable autosave.
+# autosave_interval_secs = 60
 "##;
 
 fn should_block_nested(config: &config::Config) -> bool {
@@ -368,6 +372,17 @@ fn main() -> io::Result<()> {
             api_rx,
             event_hub,
         );
+        let shutdown_tx = app.event_tx.clone();
+        tokio::spawn(async move {
+            match crate::platform::wait_for_shutdown_request().await {
+                Ok(()) => {
+                    let _ = shutdown_tx
+                        .send(crate::events::AppEvent::ShutdownRequested)
+                        .await;
+                }
+                Err(err) => tracing::error!(err = %err, "failed to subscribe to shutdown signals"),
+            }
+        });
         let result = app.run(&mut terminal).await;
 
         // Reset modifyOtherKeys if we enabled it
@@ -431,5 +446,11 @@ mod tests {
         assert!(NESTED_HERDR_MESSAGES
             .iter()
             .all(|message| !message.starts_with("herdr:")));
+    }
+
+    #[test]
+    fn default_config_includes_session_section() {
+        assert!(DEFAULT_CONFIG.contains("[session]"));
+        assert!(DEFAULT_CONFIG.contains("autosave_interval_secs = 60"));
     }
 }

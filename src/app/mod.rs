@@ -43,6 +43,12 @@ pub struct App {
     event_hub: crate::api::EventHub,
     last_focus: Option<(usize, crate::layout::PaneId)>,
     no_session: bool,
+    persistence_worker: Option<crate::persist::PersistenceWorker>,
+    session_autosave_interval: Option<Duration>,
+    next_session_save: Option<Instant>,
+    persistence_armed: bool,
+    restore_outcome: RestoreOutcome,
+    startup_session_structure: SessionStructureFingerprint,
     input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
     last_terminal_size: Option<(u16, u16)>,
     config_diagnostic_deadline: Option<Instant>,
@@ -56,6 +62,44 @@ pub struct App {
     suppressed_repeat_keys: HashSet<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreOutcome {
+    NoSnapshot,
+    CleanRestore,
+    PartialRestore,
+    RestoreFailed,
+    NewerSnapshotIgnored,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionStructureFingerprint {
+    workspaces: Vec<WorkspaceStructureFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceStructureFingerprint {
+    id: String,
+    custom_name: Option<String>,
+    tabs: Vec<TabStructureFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TabStructureFingerprint {
+    custom_name: Option<String>,
+    zoomed: bool,
+    layout: LayoutStructureFingerprint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LayoutStructureFingerprint {
+    Pane,
+    Split {
+        direction: ratatui::layout::Direction,
+        first: Box<LayoutStructureFingerprint>,
+        second: Box<LayoutStructureFingerprint>,
+    },
 }
 
 enum LoopEvent {
@@ -111,6 +155,43 @@ fn api_request_changes_ui(request: &crate::api::schema::Request) -> bool {
 }
 
 /// Resolve the palette from config: base theme + optional custom overrides.
+fn layout_structure_fingerprint(node: &crate::layout::Node) -> LayoutStructureFingerprint {
+    match node {
+        crate::layout::Node::Pane(_) => LayoutStructureFingerprint::Pane,
+        crate::layout::Node::Split {
+            direction,
+            first,
+            second,
+            ..
+        } => LayoutStructureFingerprint::Split {
+            direction: *direction,
+            first: Box::new(layout_structure_fingerprint(first)),
+            second: Box::new(layout_structure_fingerprint(second)),
+        },
+    }
+}
+
+fn session_structure_fingerprint(workspaces: &[Workspace]) -> SessionStructureFingerprint {
+    SessionStructureFingerprint {
+        workspaces: workspaces
+            .iter()
+            .map(|workspace| WorkspaceStructureFingerprint {
+                id: workspace.id.clone(),
+                custom_name: workspace.custom_name.clone(),
+                tabs: workspace
+                    .tabs
+                    .iter()
+                    .map(|tab| TabStructureFingerprint {
+                        custom_name: tab.custom_name.clone(),
+                        zoomed: tab.zoomed,
+                        layout: layout_structure_fingerprint(tab.layout.root()),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
 fn resolve_palette(config: &crate::config::Config) -> state::Palette {
     // Start with the named theme (default: catppuccin)
     let base_name = config.theme.name.as_deref().unwrap_or("catppuccin");
@@ -157,53 +238,120 @@ impl App {
         let render_dirty = Arc::new(AtomicBool::new(false));
 
         // Try to restore previous session
-        let (workspaces, active, selected, agent_panel_scope, sidebar_width) = if no_session {
+        let (
+            workspaces,
+            active,
+            selected,
+            agent_panel_scope,
+            sidebar_width,
+            restore_outcome,
+            session_diagnostic,
+        ) = if no_session {
             (
                 Vec::new(),
                 None,
                 0,
                 state::AgentPanelScope::CurrentWorkspace,
                 config.ui.sidebar_width,
+                RestoreOutcome::NoSnapshot,
+                None,
             )
-        } else if let Some(snap) = crate::persist::load() {
-            let ws = crate::persist::restore(
-                &snap,
-                24,
-                80,
-                config.advanced.scrollback_limit_bytes,
-                event_tx.clone(),
-                render_notify.clone(),
-                render_dirty.clone(),
-            );
-            if ws.is_empty() {
-                info!("session file found but no workspaces restored");
-                (
-                    Vec::new(),
-                    None,
-                    0,
-                    snap.agent_panel_scope,
-                    snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
-                )
-            } else {
-                info!(count = ws.len(), "session restored");
-                let active = snap.active.filter(|&i| i < ws.len());
-                let selected = snap.selected.min(ws.len().saturating_sub(1));
-                (
-                    ws,
-                    active,
-                    selected,
-                    snap.agent_panel_scope,
-                    snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
-                )
-            }
         } else {
-            (
-                Vec::new(),
-                None,
-                0,
-                state::AgentPanelScope::CurrentWorkspace,
-                config.ui.sidebar_width,
-            )
+            match crate::persist::load() {
+                    crate::persist::LoadResult::NoSnapshot => (
+                        Vec::new(),
+                        None,
+                        0,
+                        state::AgentPanelScope::CurrentWorkspace,
+                        config.ui.sidebar_width,
+                        RestoreOutcome::NoSnapshot,
+                        None,
+                    ),
+                    crate::persist::LoadResult::Loaded(snap) => {
+                        let report = crate::persist::restore(
+                            &snap,
+                            24,
+                            80,
+                            config.advanced.scrollback_limit_bytes,
+                            event_tx.clone(),
+                            render_notify.clone(),
+                            render_dirty.clone(),
+                        );
+                        let sidebar_width = snap.sidebar_width.unwrap_or(config.ui.sidebar_width);
+                        match report.status {
+                            crate::persist::RestoreStatus::Clean => {
+                                info!(count = report.workspaces.len(), "session restored");
+                                let active = snap.active.filter(|&i| i < report.workspaces.len());
+                                let selected = if report.workspaces.is_empty() {
+                                    0
+                                } else {
+                                    snap.selected.min(report.workspaces.len().saturating_sub(1))
+                                };
+                                (
+                                    report.workspaces,
+                                    active,
+                                    selected,
+                                    snap.agent_panel_scope,
+                                    sidebar_width,
+                                    RestoreOutcome::CleanRestore,
+                                    None,
+                                )
+                            }
+                            crate::persist::RestoreStatus::Partial => {
+                                info!(count = report.workspaces.len(), "session restored partially");
+                                let active = snap.active.filter(|&i| i < report.workspaces.len());
+                                let selected = if report.workspaces.is_empty() {
+                                    0
+                                } else {
+                                    snap.selected.min(report.workspaces.len().saturating_sub(1))
+                                };
+                                (
+                                    report.workspaces,
+                                    active,
+                                    selected,
+                                    snap.agent_panel_scope,
+                                    sidebar_width,
+                                    RestoreOutcome::PartialRestore,
+                                    Some("session restored partially; autosave paused until you make a structural session change".to_string()),
+                                )
+                            }
+                            crate::persist::RestoreStatus::Failed => {
+                                info!("session file found but no workspaces restored");
+                                (
+                                    Vec::new(),
+                                    None,
+                                    0,
+                                    snap.agent_panel_scope,
+                                    sidebar_width,
+                                    RestoreOutcome::RestoreFailed,
+                                    Some("session restore failed; keeping existing session.json until you make a structural session change".to_string()),
+                                )
+                            }
+                        }
+                    }
+                    crate::persist::LoadResult::NewerSnapshotIgnored { version } => (
+                        Vec::new(),
+                        None,
+                        0,
+                        state::AgentPanelScope::CurrentWorkspace,
+                        config.ui.sidebar_width,
+                        RestoreOutcome::NewerSnapshotIgnored,
+                        Some(format!(
+                            "session snapshot is from newer herdr version {version}; autosave paused until you make a structural session change"
+                        )),
+                    ),
+                    crate::persist::LoadResult::Failed { message } => (
+                        Vec::new(),
+                        None,
+                        0,
+                        state::AgentPanelScope::CurrentWorkspace,
+                        config.ui.sidebar_width,
+                        RestoreOutcome::RestoreFailed,
+                        Some(format!(
+                            "{message}; autosave paused until you make a structural session change"
+                        )),
+                    ),
+                }
         };
 
         info!(
@@ -264,6 +412,7 @@ impl App {
             latest_release_notes_available,
             update_dismissed: false,
             config_diagnostic,
+            session_diagnostic,
             toast: None,
             prefix_code,
             prefix_mods,
@@ -312,6 +461,21 @@ impl App {
                 .get(idx)
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
+        let startup_session_structure = session_structure_fingerprint(&state.workspaces);
+        let persistence_armed = !no_session
+            && matches!(
+                restore_outcome,
+                RestoreOutcome::NoSnapshot | RestoreOutcome::CleanRestore
+            );
+        let session_autosave_interval = (!no_session && config.session.autosave_interval_secs > 0)
+            .then_some(Duration::from_secs(config.session.autosave_interval_secs));
+        let next_session_save = if persistence_armed {
+            session_autosave_interval.map(|interval| Instant::now() + interval)
+        } else {
+            None
+        };
+        let persistence_worker =
+            (!no_session).then(|| crate::persist::PersistenceWorker::new(event_tx.clone()));
 
         Self {
             config_diagnostic_deadline: state
@@ -334,6 +498,12 @@ impl App {
             event_hub,
             last_focus,
             no_session,
+            persistence_worker,
+            session_autosave_interval,
+            next_session_save,
+            persistence_armed,
+            restore_outcome,
+            startup_session_structure,
             input_rx: None,
             last_terminal_size: terminal::size().ok(),
             render_notify,
@@ -386,6 +556,8 @@ impl App {
                 self.create_tab();
                 needs_render = true;
             }
+
+            self.refresh_persistence_gate(Instant::now());
 
             let now = Instant::now();
             self.sync_animation_timer(now);
@@ -449,17 +621,8 @@ impl App {
             }
         }
 
-        // Save session on exit (skip in --no-session mode)
-        if !self.no_session && !self.state.workspaces.is_empty() {
-            let snap = crate::persist::capture(
-                &self.state.workspaces,
-                self.state.active,
-                self.state.selected,
-                self.state.agent_panel_scope,
-                self.state.sidebar_width,
-            );
-            crate::persist::save(&snap);
-        }
+        self.refresh_persistence_gate(Instant::now());
+        self.finalize_persistence()?;
 
         Ok(())
     }
@@ -555,6 +718,57 @@ impl App {
         let _ = std::io::stdout().flush();
     }
 
+    fn capture_session_snapshot(&self) -> crate::persist::SessionSnapshot {
+        crate::persist::capture(
+            &self.state.workspaces,
+            self.state.active,
+            self.state.selected,
+            self.state.agent_panel_scope,
+            self.state.sidebar_width,
+        )
+    }
+
+    fn refresh_persistence_gate(&mut self, now: Instant) {
+        if self.no_session || self.persistence_armed {
+            return;
+        }
+
+        if session_structure_fingerprint(&self.state.workspaces) != self.startup_session_structure {
+            info!(restore_outcome = ?self.restore_outcome, "session persistence armed after structural change");
+            self.persistence_armed = true;
+            if self.next_session_save.is_none() {
+                self.next_session_save = self
+                    .session_autosave_interval
+                    .map(|interval| now + interval);
+            }
+        }
+    }
+
+    fn enqueue_session_persistence(&mut self) -> Option<u64> {
+        if self.no_session || !self.persistence_armed {
+            return None;
+        }
+
+        let worker = self.persistence_worker.as_ref()?;
+        Some(if self.state.workspaces.is_empty() {
+            worker.enqueue_clear()
+        } else {
+            worker.enqueue_save(self.capture_session_snapshot())
+        })
+    }
+
+    fn finalize_persistence(&mut self) -> io::Result<()> {
+        if self.persistence_armed {
+            let _ = self.enqueue_session_persistence();
+        }
+
+        let Some(worker) = self.persistence_worker.take() else {
+            return Ok(());
+        };
+
+        worker.shutdown().map_err(io::Error::other)
+    }
+
     fn apply_host_terminal_theme_to_panes(&self) {
         if self.state.host_terminal_theme.is_empty() {
             return;
@@ -635,6 +849,17 @@ impl App {
             self.run_auto_update_check();
         }
 
+        if self
+            .next_session_save
+            .is_some_and(|deadline| now >= deadline)
+        {
+            let _ = self.enqueue_session_persistence();
+            self.next_session_save = self
+                .session_autosave_interval
+                .filter(|_| self.persistence_armed)
+                .map(|interval| now + interval);
+        }
+
         self.sync_animation_timer(now);
         changed
     }
@@ -706,6 +931,7 @@ impl App {
             self.next_animation_tick,
             self.git_refresh_deadline(),
             self.next_auto_update_check,
+            self.next_session_save,
             render_deadline,
         ]
         .into_iter()
@@ -723,18 +949,39 @@ impl App {
     }
 
     fn handle_internal_event(&mut self, ev: AppEvent) {
-        if let AppEvent::PaneDied { pane_id } = &ev {
-            if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
-                if let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) {
-                    self.emit_event(crate::api::schema::EventEnvelope {
-                        event: crate::api::schema::EventKind::PaneExited,
-                        data: crate::api::schema::EventData::PaneExited {
-                            pane_id: public_pane_id,
-                            workspace_id: self.public_workspace_id(ws_idx),
-                        },
-                    });
+        match &ev {
+            AppEvent::ShutdownRequested => {
+                self.state.should_quit = true;
+                return;
+            }
+            AppEvent::SessionPersistenceSucceeded { generation } => {
+                tracing::debug!(generation = *generation, "session persistence succeeded");
+                self.state.session_diagnostic = None;
+                return;
+            }
+            AppEvent::SessionPersistenceFailed {
+                generation,
+                action,
+                error,
+            } => {
+                tracing::error!(generation = *generation, action = *action, error = %error, "session persistence failed");
+                self.state.session_diagnostic = Some(format!("{action} failed: {error}"));
+                return;
+            }
+            AppEvent::PaneDied { pane_id } => {
+                if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
+                    if let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) {
+                        self.emit_event(crate::api::schema::EventEnvelope {
+                            event: crate::api::schema::EventKind::PaneExited,
+                            data: crate::api::schema::EventData::PaneExited {
+                                pane_id: public_pane_id,
+                                workspace_id: self.public_workspace_id(ws_idx),
+                            },
+                        });
+                    }
                 }
             }
+            _ => {}
         }
 
         let released_agent = if let AppEvent::HookAgentReleased { pane_id, agent, .. } = &ev {
@@ -2480,5 +2727,47 @@ mod tests {
             AgentState::Idle,
             "Working→Idle should still apply after temporary queue pressure"
         );
+    }
+
+    #[test]
+    fn shutdown_requested_sets_should_quit() {
+        let mut app = test_app();
+        app.handle_internal_event(AppEvent::ShutdownRequested);
+        assert!(app.state.should_quit);
+    }
+
+    #[test]
+    fn structural_session_change_arms_persistence_after_partial_restore() {
+        let mut app = test_app();
+        app.no_session = false;
+        app.restore_outcome = RestoreOutcome::PartialRestore;
+        app.persistence_armed = false;
+        app.session_autosave_interval = Some(Duration::from_secs(10));
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.startup_session_structure = session_structure_fingerprint(&app.state.workspaces);
+
+        app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.refresh_persistence_gate(Instant::now());
+
+        assert!(app.persistence_armed);
+        assert!(app.next_session_save.is_some());
+    }
+
+    #[test]
+    fn focus_change_does_not_arm_persistence_after_partial_restore() {
+        let mut app = test_app();
+        app.no_session = false;
+        app.restore_outcome = RestoreOutcome::PartialRestore;
+        app.persistence_armed = false;
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        let second_pane =
+            app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.startup_session_structure = session_structure_fingerprint(&app.state.workspaces);
+
+        let tab = &mut app.state.workspaces[0].tabs[0];
+        tab.layout.focus_pane(second_pane);
+        app.refresh_persistence_gate(Instant::now());
+
+        assert!(!app.persistence_armed);
     }
 }
