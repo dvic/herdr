@@ -5,6 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
     state::{WorktreeCreateState, WorktreeOpenEntry, WorktreeOpenState, WorktreeRemoveState},
+    text_input::TextInputState,
     App, Mode,
 };
 #[cfg(test)]
@@ -108,8 +109,7 @@ impl App {
             "opening worktree dialog"
         );
         self.state.selected = ws_idx;
-        self.state.name_input = branch.clone();
-        self.state.name_input_replace_on_type = true;
+        self.state.name_input = TextInputState::with_replace_on_type(branch.clone());
         self.state.worktree_create = Some(WorktreeCreateState {
             source_workspace_id,
             source_checkout_path,
@@ -249,13 +249,9 @@ impl App {
             }
             KeyCode::Enter => self.submit_worktree_create_via_api(),
             KeyCode::Backspace => {
-                if self.state.name_input_replace_on_type {
-                    self.state.name_input.clear();
-                    self.state.name_input_replace_on_type = false;
-                } else {
-                    self.state.name_input.pop();
+                if self.state.name_input.backspace() {
+                    self.sync_worktree_branch_from_input();
                 }
-                self.sync_worktree_branch_from_input();
             }
             KeyCode::Char(c) => {
                 self.insert_worktree_create_text(&c.to_string());
@@ -265,12 +261,9 @@ impl App {
     }
 
     pub(crate) fn insert_worktree_create_text(&mut self, text: &str) {
-        if self.state.name_input_replace_on_type {
-            self.state.name_input.clear();
-            self.state.name_input_replace_on_type = false;
+        if self.state.name_input.insert_str(text) {
+            self.sync_worktree_branch_from_input();
         }
-        self.state.name_input.push_str(text);
-        self.sync_worktree_branch_from_input();
     }
 
     pub(crate) fn handle_worktree_open_key(&mut self, key: KeyEvent) {
@@ -480,7 +473,6 @@ impl App {
     fn close_worktree_create_dialog(&mut self) {
         self.state.worktree_create = None;
         self.state.name_input.clear();
-        self.state.name_input_replace_on_type = false;
         self.state.mode = if self.state.active.is_some() {
             Mode::Terminal
         } else {
@@ -492,7 +484,7 @@ impl App {
         let Some(create) = &mut self.state.worktree_create else {
             return;
         };
-        create.branch = self.state.name_input.clone();
+        create.branch = self.state.name_input.text().to_string();
         create.checkout_path = crate::worktree::default_checkout_path(
             &self.state.worktree_directory,
             &create.repo_name,
@@ -517,7 +509,7 @@ impl App {
         }
 
         create.branch = branch.clone();
-        self.state.name_input = branch.clone();
+        self.state.name_input = branch.clone().into();
         create.checkout_path = crate::worktree::default_checkout_path(
             &self.state.worktree_directory,
             &create.repo_name,
@@ -579,7 +571,7 @@ impl App {
         }
 
         create.branch = branch.clone();
-        self.state.name_input = branch.clone();
+        self.state.name_input = branch.clone().into();
         create.checkout_path = crate::worktree::default_checkout_path(
             &self.state.worktree_directory,
             &create.repo_name,
@@ -802,7 +794,6 @@ impl App {
                 let source_repo_root = create.source_repo_root.clone();
                 self.state.worktree_create = None;
                 self.state.name_input.clear();
-                self.state.name_input_replace_on_type = false;
                 let source_membership = source_existing_membership.unwrap_or(
                     crate::workspace::WorktreeSpaceMembership {
                         key: repo_key.clone(),
@@ -1139,7 +1130,7 @@ mod tests {
     fn worktree_create_replaces_prefilled_branch_on_paste_and_syncs_state() {
         let mut app = app_for_worktree_tests();
         app.state.name_input = "generated-branch".into();
-        app.state.name_input_replace_on_type = true;
+        app.state.name_input.set_replace_on_type(true);
         app.state.worktree_create = Some(WorktreeCreateState {
             source_workspace_id: "source".into(),
             source_checkout_path: "/repo/herdr".into(),
@@ -1156,7 +1147,7 @@ mod tests {
         app.insert_worktree_create_text("feature/linear-302");
 
         assert_eq!(app.state.name_input, "feature/linear-302");
-        assert!(!app.state.name_input_replace_on_type);
+        assert!(!app.state.name_input.replace_on_type());
         assert_eq!(
             app.state
                 .worktree_create

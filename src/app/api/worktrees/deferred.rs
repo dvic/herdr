@@ -435,7 +435,6 @@ impl App {
         {
             self.state.worktree_create = None;
             self.state.name_input.clear();
-            self.state.name_input_replace_on_type = false;
             self.state.mode = crate::app::Mode::Terminal;
         }
         self.state.mark_session_dirty();

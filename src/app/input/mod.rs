@@ -698,12 +698,12 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::RenameTab;
         app.state.name_input = "2".into();
-        app.state.name_input_replace_on_type = true;
+        app.state.name_input.set_replace_on_type(true);
 
         app.handle_paste("feature/logs".into()).await;
 
         assert_eq!(app.state.name_input, "feature/logs");
-        assert!(!app.state.name_input_replace_on_type);
+        assert!(!app.state.name_input.replace_on_type());
     }
 
     #[tokio::test]
@@ -711,7 +711,7 @@ mod tests {
         let mut app = test_app();
         app.state.mode = Mode::NewLinkedWorktree;
         app.state.name_input = "generated-branch".into();
-        app.state.name_input_replace_on_type = true;
+        app.state.name_input.set_replace_on_type(true);
         app.state.worktree_create = Some(crate::app::state::WorktreeCreateState {
             source_workspace_id: "source".into(),
             source_checkout_path: "/repo/herdr".into(),

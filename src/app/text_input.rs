@@ -40,20 +40,24 @@ impl TextInputState {
         &self.text
     }
 
+    #[allow(dead_code)] // render and mouse wiring use this in a later plan increment.
     pub(crate) fn cursor(&self) -> usize {
         self.cursor
     }
 
+    #[cfg(test)]
     pub(crate) fn replace_on_type(&self) -> bool {
         self.replace_on_type
     }
 
+    #[cfg(test)]
     pub(crate) fn set_text(&mut self, text: impl Into<String>) {
         self.text = text.into();
         self.cursor = self.text.len();
         self.resnap_cursor();
     }
 
+    #[cfg(test)]
     pub(crate) fn set_replace_on_type(&mut self, replace_on_type: bool) {
         self.replace_on_type = replace_on_type;
     }
@@ -289,6 +293,38 @@ impl TextInputState {
 
     fn boundaries(&self) -> Vec<usize> {
         grapheme_boundaries(&self.text)
+    }
+}
+
+impl From<&str> for TextInputState {
+    fn from(text: &str) -> Self {
+        Self::with_text(text)
+    }
+}
+
+impl From<String> for TextInputState {
+    fn from(text: String) -> Self {
+        Self::with_text(text)
+    }
+}
+
+impl std::fmt::Display for TextInputState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.text.fmt(f)
+    }
+}
+
+impl std::ops::Deref for TextInputState {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.text()
+    }
+}
+
+impl PartialEq<&str> for TextInputState {
+    fn eq(&self, other: &&str) -> bool {
+        self.text() == *other
     }
 }
 

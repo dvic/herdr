@@ -2954,7 +2954,7 @@ last_pane = "prefix+tab"
         assert_eq!(state.mode, Mode::RenameTab);
         assert!(state.creating_new_tab);
         assert_eq!(state.name_input, "2");
-        assert!(state.name_input_replace_on_type);
+        assert!(state.name_input.replace_on_type());
         assert!(!state.request_new_tab);
         assert_eq!(state.workspaces[0].tabs.len(), 1);
     }

@@ -18,7 +18,6 @@ mod runtime_mutations;
 mod session;
 pub mod state;
 mod terminal_targets;
-#[allow(dead_code)] // staged pure editor; dialog wiring in the next increment removes this.
 pub(crate) mod text_input;
 mod theme_sync;
 mod worktrees;
@@ -534,8 +533,7 @@ impl App {
             worktree_directory,
             collapsed_space_keys,
             request_complete_onboarding: false,
-            name_input: String::new(),
-            name_input_replace_on_type: false,
+            name_input: crate::app::text_input::TextInputState::new(),
             release_notes: None,
             product_announcement: startup_product_announcement.map(|announcement| {
                 state::ProductAnnouncementState {
@@ -4509,12 +4507,12 @@ last_pane = "prefix+tab"
         app.state.selected = 0;
         app.state.mode = Mode::RenameTab;
         app.state.name_input = "2".into();
-        app.state.name_input_replace_on_type = true;
+        app.state.name_input.set_replace_on_type(true);
 
         app.route_client_input(b"\x1b[200~feature/logs\x1b[201~".to_vec());
 
         assert_eq!(app.state.name_input, "feature/logs");
-        assert!(!app.state.name_input_replace_on_type);
+        assert!(!app.state.name_input.replace_on_type());
     }
 
     #[test]
@@ -4573,7 +4571,7 @@ last_pane = "prefix+tab"
         let mut app = test_app();
         app.state.mode = Mode::NewLinkedWorktree;
         app.state.name_input = "generated-branch".into();
-        app.state.name_input_replace_on_type = true;
+        app.state.name_input.set_replace_on_type(true);
         app.state.worktree_create = Some(state::WorktreeCreateState {
             source_workspace_id: "source".into(),
             source_checkout_path: "/repo/herdr".into(),
