@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
+    input::handle_rename_edit_key,
     state::{WorktreeCreateState, WorktreeOpenEntry, WorktreeOpenState, WorktreeRemoveState},
     text_input::TextInputState,
     App, Mode,
@@ -248,22 +249,37 @@ impl App {
                 self.close_worktree_create_dialog();
             }
             KeyCode::Enter => self.submit_worktree_create_via_api(),
-            KeyCode::Backspace => {
-                if self.state.name_input.backspace() {
+            _ => {
+                if self
+                    .state
+                    .worktree_create
+                    .as_ref()
+                    .is_some_and(|create| create.creating)
+                {
+                    return;
+                }
+                let outcome = handle_rename_edit_key(&mut self.state, key);
+                if outcome.consumed && outcome.text_changed {
                     self.sync_worktree_branch_from_input();
                 }
             }
-            KeyCode::Char(c) => {
-                self.insert_worktree_create_text(&c.to_string());
-            }
-            _ => {}
         }
     }
 
-    pub(crate) fn insert_worktree_create_text(&mut self, text: &str) {
-        if self.state.name_input.insert_str(text) {
+    pub(crate) fn insert_worktree_create_text(&mut self, text: &str) -> bool {
+        if self
+            .state
+            .worktree_create
+            .as_ref()
+            .is_some_and(|create| create.creating)
+        {
+            return false;
+        }
+        let text_changed = self.state.name_input.insert_str(text);
+        if text_changed {
             self.sync_worktree_branch_from_input();
         }
+        text_changed
     }
 
     pub(crate) fn handle_worktree_open_key(&mut self, key: KeyEvent) {
@@ -1087,6 +1103,29 @@ mod tests {
         }
     }
 
+    fn sample_worktree_create(
+        branch: &str,
+        creating: bool,
+        error: Option<&str>,
+    ) -> WorktreeCreateState {
+        WorktreeCreateState {
+            source_workspace_id: "source".into(),
+            source_checkout_path: "/repo/herdr".into(),
+            source_existing_membership: None,
+            source_repo_root: "/repo/herdr".into(),
+            repo_key: "repo-key".into(),
+            repo_name: "herdr".into(),
+            branch: branch.into(),
+            checkout_path: crate::worktree::default_checkout_path(
+                &std::path::PathBuf::from("/repo"),
+                "herdr",
+                branch,
+            ),
+            error: error.map(str::to_string),
+            creating,
+        }
+    }
+
     #[tokio::test]
     async fn ui_create_workspace_emits_initial_workspace_tab_and_pane_events() {
         let event_hub = crate::api::EventHub::default();
@@ -1155,6 +1194,52 @@ mod tests {
                 .map(|create| create.branch.as_str()),
             Some("feature/linear-302")
         );
+    }
+
+    #[test]
+    fn worktree_create_delegates_line_editing_and_syncs_only_on_text_change() {
+        let mut app = app_for_worktree_tests();
+        app.state.worktree_directory = "/repo".into();
+        app.state.mode = Mode::NewLinkedWorktree;
+        app.state.name_input = "branch".into();
+        app.state.worktree_create =
+            Some(sample_worktree_create("branch", false, Some("old error")));
+
+        app.handle_worktree_create_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+
+        let create = app.state.worktree_create.as_ref().unwrap();
+        assert_eq!(app.state.name_input, "branch");
+        assert_eq!(app.state.name_input.cursor(), 0);
+        assert_eq!(create.branch, "branch");
+        assert_eq!(create.error.as_deref(), Some("old error"));
+
+        app.handle_worktree_create_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()));
+
+        let create = app.state.worktree_create.as_ref().unwrap();
+        assert_eq!(app.state.name_input, "xbranch");
+        assert_eq!(create.branch, "xbranch");
+        assert_eq!(create.error, None);
+    }
+
+    #[test]
+    fn worktree_create_freezes_text_changes_while_creating_including_paste() {
+        let mut app = app_for_worktree_tests();
+        app.state.mode = Mode::NewLinkedWorktree;
+        app.state.name_input = "generated-branch".into();
+        app.state.worktree_create = Some(sample_worktree_create(
+            "generated-branch",
+            true,
+            Some("creating"),
+        ));
+
+        app.handle_worktree_create_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
+        app.handle_worktree_create_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()));
+        assert!(app.paste_into_active_text_input("feature/pasted"));
+
+        let create = app.state.worktree_create.as_ref().unwrap();
+        assert_eq!(app.state.name_input, "generated-branch");
+        assert_eq!(create.branch, "generated-branch");
+        assert_eq!(create.error.as_deref(), Some("creating"));
     }
 
     #[test]
