@@ -199,6 +199,44 @@ fn repeat_key_identity(
     (key.code, key.modifiers)
 }
 
+fn text_input_modal_allows_repeat(state: &AppState, key: &crate::input::TerminalKey) -> bool {
+    if !matches!(
+        state.mode,
+        Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::NewLinkedWorktree
+    ) {
+        return false;
+    }
+
+    let key_event = key.as_key_event();
+    if input::is_modal_paste_shortcut(&key_event) {
+        return false;
+    }
+
+    match key_event.code {
+        crossterm::event::KeyCode::Left
+        | crossterm::event::KeyCode::Right
+        | crossterm::event::KeyCode::Home
+        | crossterm::event::KeyCode::End
+        | crossterm::event::KeyCode::Delete
+        | crossterm::event::KeyCode::Backspace => true,
+        crossterm::event::KeyCode::Char(c) => {
+            key_event
+                .modifiers
+                .difference(crossterm::event::KeyModifiers::SHIFT)
+                .is_empty()
+                || key_event
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                    && matches!(c.to_ascii_lowercase(), 'a' | 'e' | 'h' | 'k' | 'u' | 'w')
+                || key_event
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::ALT)
+                    && matches!(c.to_ascii_lowercase(), 'b' | 'f')
+        }
+        _ => false,
+    }
+}
+
 fn auto_updates_enabled(no_session: bool) -> bool {
     !no_session && !cfg!(debug_assertions)
 }
@@ -1550,8 +1588,10 @@ impl App {
                                 && !self.suppressed_repeat_keys.contains(&key_id)
                             {
                                 self.handle_terminal_key_headless(key);
+                            } else if text_input_modal_allows_repeat(&self.state, &key) {
+                                self.handle_non_terminal_key_headless(key);
                             }
-                            // Repeats in non-terminal modes are ignored
+                            // Other non-terminal repeats are ignored
                             // (same as monolithic behavior).
                         }
                         crossterm::event::KeyEventKind::Release => {
@@ -1620,7 +1660,8 @@ impl App {
     /// since the server doesn't have the async context of the monolithic App.
     fn handle_non_terminal_key_headless(&mut self, key: crate::input::TerminalKey) {
         let key_event = key.as_key_event();
-        if input::modal_paste_target_active(&self.state)
+        if key_event.kind == crossterm::event::KeyEventKind::Press
+            && input::modal_paste_target_active(&self.state)
             && input::is_modal_paste_shortcut(&key_event)
         {
             if let Some(text) = crate::platform::read_clipboard_text() {
@@ -1717,6 +1758,17 @@ mod tests {
         crate::raw_input::RawInputEvent::Key(
             crate::input::TerminalKey::new(code, modifiers).with_kind(kind),
         )
+    }
+
+    fn modal_paste_modifier() -> KeyModifiers {
+        #[cfg(target_os = "macos")]
+        {
+            KeyModifiers::SUPER
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            KeyModifiers::CONTROL
+        }
     }
 
     fn release_notes_state() -> state::ReleaseNotesState {
@@ -3165,6 +3217,97 @@ mod tests {
         assert!(!handled);
         assert_eq!(app.state.mode, Mode::ReleaseNotes);
         assert!(app.state.release_notes.is_some());
+    }
+
+    #[tokio::test]
+    async fn repeat_key_events_edit_text_input_modals() {
+        let mut app = test_app();
+        app.state.mode = Mode::RenameTab;
+        app.state.name_input = "abc".into();
+
+        let handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Backspace,
+                KeyModifiers::empty(),
+                KeyEventKind::Repeat,
+            ))
+            .await;
+
+        assert!(handled);
+        assert_eq!(app.state.name_input, "ab");
+    }
+
+    #[tokio::test]
+    async fn repeat_modal_paste_shortcut_is_ignored() {
+        let mut app = test_app();
+        app.state.mode = Mode::RenameTab;
+        app.state.name_input = "abc".into();
+
+        let handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Char('v'),
+                modal_paste_modifier(),
+                KeyEventKind::Repeat,
+            ))
+            .await;
+
+        assert!(!handled);
+        assert_eq!(app.state.name_input, "abc");
+    }
+
+    #[test]
+    fn route_client_events_allows_text_input_repeats() {
+        let mut app = test_app();
+        app.state.mode = Mode::RenameTab;
+        app.state.name_input = "abc".into();
+
+        app.route_client_events(
+            vec![raw_key(
+                KeyCode::Backspace,
+                KeyModifiers::empty(),
+                KeyEventKind::Repeat,
+            )],
+            true,
+        );
+
+        assert_eq!(app.state.name_input, "ab");
+    }
+
+    #[test]
+    fn route_client_events_keeps_non_text_repeats_dropped() {
+        let mut app = test_app();
+        app.state.mode = Mode::ReleaseNotes;
+        app.state.release_notes = Some(release_notes_state());
+
+        app.route_client_events(
+            vec![raw_key(
+                KeyCode::Enter,
+                KeyModifiers::empty(),
+                KeyEventKind::Repeat,
+            )],
+            true,
+        );
+
+        assert_eq!(app.state.mode, Mode::ReleaseNotes);
+        assert!(app.state.release_notes.is_some());
+    }
+
+    #[test]
+    fn route_client_events_ignores_repeat_modal_paste_shortcut() {
+        let mut app = test_app();
+        app.state.mode = Mode::RenameTab;
+        app.state.name_input = "abc".into();
+
+        app.route_client_events(
+            vec![raw_key(
+                KeyCode::Char('v'),
+                modal_paste_modifier(),
+                KeyEventKind::Repeat,
+            )],
+            true,
+        );
+
+        assert_eq!(app.state.name_input, "abc");
     }
 
     #[tokio::test]

@@ -69,7 +69,10 @@ use super::App;
 impl App {
     pub(super) async fn handle_key(&mut self, key: TerminalKey) {
         let key_event = key.as_key_event();
-        if modal_paste_target_active(&self.state) && is_modal_paste_shortcut(&key_event) {
+        if key_event.kind == crossterm::event::KeyEventKind::Press
+            && modal_paste_target_active(&self.state)
+            && is_modal_paste_shortcut(&key_event)
+        {
             if let Some(text) = crate::platform::read_clipboard_text() {
                 self.paste_into_active_text_input(&text);
             }
