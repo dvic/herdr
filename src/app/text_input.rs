@@ -40,9 +40,18 @@ impl TextInputState {
         &self.text
     }
 
-    #[allow(dead_code)] // render and mouse wiring use this in a later plan increment.
     pub(crate) fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    pub(crate) fn set_cursor(&mut self, cursor: usize) -> bool {
+        self.disarm();
+        let cursor = nearest_grapheme_boundary(&self.text, cursor);
+        if self.cursor == cursor {
+            return false;
+        }
+        self.cursor = cursor;
+        true
     }
 
     #[cfg(test)]

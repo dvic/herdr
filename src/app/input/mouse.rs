@@ -252,6 +252,11 @@ impl AppState {
                     if let Some(inner) =
                         crate::ui::new_linked_worktree_inner_rect(self.screen_rect())
                     {
+                        let input_rect = crate::ui::new_linked_worktree_input_rect(inner);
+                        if rect_contains(input_rect, mouse.column, mouse.row) {
+                            place_name_input_cursor(self, input_rect, mouse.column);
+                            return None;
+                        }
                         let (create, cancel) = crate::ui::new_linked_worktree_button_rects(inner);
                         match modal_action_from_buttons(
                             mouse.column,
@@ -387,6 +392,13 @@ impl AppState {
                     self.mode,
                     Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane
                 ) {
+                    if let Some(inner) = self.rename_modal_inner() {
+                        let input_rect = crate::ui::rename_input_rect(inner);
+                        if rect_contains(input_rect, mouse.column, mouse.row) {
+                            place_name_input_cursor(self, input_rect, mouse.column);
+                            return None;
+                        }
+                    }
                     let action = self
                         .rename_modal_inner()
                         .map(crate::ui::rename_button_rects)
@@ -1826,6 +1838,15 @@ fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
         && row < rect.y + rect.height
 }
 
+fn place_name_input_cursor(state: &mut AppState, input_rect: Rect, col: u16) {
+    let view = crate::ui::text_input_view(input_rect, &state.name_input);
+    let column = col
+        .saturating_sub(view.text_rect.x)
+        .min(view.text_rect.width);
+    let cursor = crate::ui::text_input_byte_offset_for_column(&state.name_input, view, column);
+    state.name_input.set_cursor(cursor);
+}
+
 fn apply_scroll(scroll: &mut usize, delta: i16, max_scroll: usize) {
     if delta.is_negative() {
         *scroll = scroll.saturating_sub(delta.unsigned_abs() as usize);
@@ -1845,7 +1866,9 @@ mod tests {
     use super::*;
     use crate::app::input::modal::handle_context_menu_key;
     use crate::{
-        app::state::{ContextMenuKind, ContextMenuState, MenuListState, Mode, ViewLayout},
+        app::state::{
+            ContextMenuKind, ContextMenuState, MenuListState, Mode, ViewLayout, WorktreeCreateState,
+        },
         detect::{Agent, AgentState},
         workspace::Workspace,
     };
@@ -2508,6 +2531,64 @@ mod tests {
         assert!(app.event_hub.events_after(0).iter().any(|(_, event)| {
             matches!(event.event, crate::api::schema::EventKind::WorkspaceRenamed)
         }));
+    }
+
+    #[test]
+    fn clicking_rename_input_places_cursor_without_canceling() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("old")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::RenameWorkspace;
+        app.state.name_input = "abcdef".into();
+        app.state.name_input.set_replace_on_type(true);
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        let inner = app.state.rename_modal_inner().unwrap();
+        let input = crate::ui::rename_input_rect(inner);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            input.x + 1 + 3,
+            input.y,
+        ));
+
+        assert_eq!(app.state.mode, Mode::RenameWorkspace);
+        assert_eq!(app.state.name_input.cursor(), "abc".len());
+        assert!(!app.state.name_input.replace_on_type());
+    }
+
+    #[test]
+    fn clicking_worktree_create_input_places_cursor_without_canceling() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::NewLinkedWorktree;
+        app.state.name_input = "feature/branch".into();
+        app.state.name_input.set_replace_on_type(true);
+        app.state.worktree_create = Some(WorktreeCreateState {
+            source_workspace_id: "source".into(),
+            source_checkout_path: "/repo/herdr".into(),
+            source_existing_membership: None,
+            source_repo_root: "/repo/herdr".into(),
+            repo_key: "repo-key".into(),
+            repo_name: "herdr".into(),
+            branch: "feature/branch".into(),
+            checkout_path: "/repo/herdr-feature-branch".into(),
+            error: None,
+            creating: false,
+        });
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        let inner = crate::ui::new_linked_worktree_inner_rect(app.state.screen_rect()).unwrap();
+        let input = crate::ui::new_linked_worktree_input_rect(inner);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            input.x + 1 + "feature".len() as u16,
+            input.y,
+        ));
+
+        assert_eq!(app.state.mode, Mode::NewLinkedWorktree);
+        assert!(app.state.worktree_create.is_some());
+        assert_eq!(app.state.name_input.cursor(), "feature".len());
+        assert!(!app.state.name_input.replace_on_type());
     }
 
     #[test]

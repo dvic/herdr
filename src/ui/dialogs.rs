@@ -5,16 +5,29 @@ use ratatui::{
     widgets::{Clear, Paragraph, Wrap},
     Frame,
 };
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use super::text::{display_width_u16, truncate_end};
 use super::widgets::{
     action_button_row_rects, centered_popup_rect, panel_contrast_fg, render_action_button,
     render_modal_header, render_modal_shell, render_panel_shell, ActionButtonSpec,
 };
+use crate::app::text_input::TextInputState;
 use crate::app::{state::WorktreeOpenState, AppState, Mode};
 
 const NEW_LINKED_WORKTREE_POPUP_WIDTH: u16 = 68;
 const NEW_LINKED_WORKTREE_POPUP_HEIGHT: u16 = 12;
+const TEXT_INPUT_LEADING_PADDING: u16 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TextInputView {
+    pub(crate) rect: Rect,
+    pub(crate) text_rect: Rect,
+    pub(crate) window_start: usize,
+    pub(crate) window_start_col: usize,
+    pub(crate) cursor_col: usize,
+}
 
 pub(crate) fn rename_button_rects(inner: Rect) -> (Rect, Rect, Rect) {
     let rects = action_button_row_rects(
@@ -37,6 +50,184 @@ pub(crate) fn rename_button_rects(inner: Rect) -> (Rect, Rect, Rect) {
         3,
     );
     (rects[0], rects[1], rects[2])
+}
+
+pub(crate) fn rename_input_rect(inner: Rect) -> Rect {
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas::<5>(inner);
+    Rect::new(rows[2].x, rows[2].y, rows[2].width, 1)
+}
+
+pub(crate) fn new_linked_worktree_input_rect(inner: Rect) -> Rect {
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas::<8>(inner);
+    Rect::new(rows[2].x, rows[2].y, rows[2].width, 1)
+}
+
+pub(crate) fn text_input_view(rect: Rect, input: &TextInputState) -> TextInputView {
+    let text_width = rect.width.saturating_sub(TEXT_INPUT_LEADING_PADDING) as usize;
+    let text_rect = Rect::new(
+        rect.x.saturating_add(TEXT_INPUT_LEADING_PADDING),
+        rect.y,
+        rect.width.saturating_sub(TEXT_INPUT_LEADING_PADDING),
+        1,
+    );
+    let cursor_col = display_width_to(input.text(), input.cursor());
+    let cursor_cell_width = input
+        .text()
+        .get(input.cursor()..)
+        .and_then(|suffix| suffix.graphemes(true).next())
+        .map_or(1, |grapheme| UnicodeWidthStr::width(grapheme).max(1));
+    let cursor_end_col = cursor_col.saturating_add(cursor_cell_width);
+    let target_col = cursor_end_col.saturating_sub(text_width);
+    let (window_start, window_start_col) = if text_width == 0 || target_col == 0 {
+        (0, 0)
+    } else {
+        first_boundary_at_or_after_col(input.text(), target_col, input.cursor())
+    };
+
+    TextInputView {
+        rect,
+        text_rect,
+        window_start,
+        window_start_col,
+        cursor_col,
+    }
+}
+
+pub(crate) fn text_input_byte_offset_for_column(
+    input: &TextInputState,
+    view: TextInputView,
+    column: u16,
+) -> usize {
+    let target_col = view.window_start_col.saturating_add(column as usize);
+    nearest_boundary_for_col(input.text(), target_col)
+}
+
+fn display_width_to(text: &str, byte_offset: usize) -> usize {
+    text.get(..byte_offset)
+        .map(UnicodeWidthStr::width)
+        .unwrap_or_else(|| UnicodeWidthStr::width(text))
+}
+
+fn grapheme_boundaries_with_columns(text: &str) -> Vec<(usize, usize)> {
+    let mut boundaries = Vec::new();
+    let mut col = 0;
+    for (idx, grapheme) in text.grapheme_indices(true) {
+        boundaries.push((idx, col));
+        col += UnicodeWidthStr::width(grapheme);
+    }
+    boundaries.push((text.len(), col));
+    boundaries
+}
+
+fn first_boundary_at_or_after_col(
+    text: &str,
+    target_col: usize,
+    max_byte: usize,
+) -> (usize, usize) {
+    let mut last = (0, 0);
+    for boundary in grapheme_boundaries_with_columns(text)
+        .into_iter()
+        .take_while(|(idx, _)| *idx <= max_byte)
+    {
+        if boundary.1 >= target_col {
+            return boundary;
+        }
+        last = boundary;
+    }
+    last
+}
+
+fn nearest_boundary_for_col(text: &str, target_col: usize) -> usize {
+    let boundaries = grapheme_boundaries_with_columns(text);
+    for pair in boundaries.windows(2) {
+        let (start_idx, start_col) = pair[0];
+        let (end_idx, end_col) = pair[1];
+        if target_col <= end_col {
+            return if target_col.saturating_sub(start_col) <= end_col.saturating_sub(target_col) {
+                start_idx
+            } else {
+                end_idx
+            };
+        }
+    }
+    text.len()
+}
+
+fn render_text_input(app: &AppState, frame: &mut Frame, rect: Rect) {
+    let view = text_input_view(rect, &app.name_input);
+    let base_style = Style::default()
+        .fg(app.palette.text)
+        .bg(app.palette.surface0);
+    frame.render_widget(Clear, view.rect);
+    frame.render_widget(
+        Paragraph::new(text_input_line(&app.name_input, view, base_style)).style(base_style),
+        view.rect,
+    );
+}
+
+fn text_input_line(
+    input: &TextInputState,
+    view: TextInputView,
+    base_style: Style,
+) -> Line<'static> {
+    let cursor_style = base_style.add_modifier(Modifier::REVERSED);
+    let text_width = view.text_rect.width as usize;
+    let mut spans = Vec::new();
+    spans.push(Span::styled(
+        " ".repeat(TEXT_INPUT_LEADING_PADDING as usize),
+        base_style,
+    ));
+
+    if text_width == 0 {
+        return Line::from(spans);
+    }
+
+    let mut used = 0usize;
+    let mut rendered_cursor = false;
+    let text = input.text();
+    for (idx, grapheme) in text[view.window_start..].grapheme_indices(true) {
+        let byte_idx = view.window_start + idx;
+        if byte_idx == input.cursor() {
+            let width = UnicodeWidthStr::width(grapheme).max(1);
+            if used + width > text_width {
+                break;
+            }
+            spans.push(Span::styled(grapheme.to_string(), cursor_style));
+            used += width;
+            rendered_cursor = true;
+            continue;
+        }
+
+        let width = UnicodeWidthStr::width(grapheme);
+        if used + width > text_width {
+            break;
+        }
+        spans.push(Span::styled(grapheme.to_string(), base_style));
+        used += width;
+    }
+
+    if input.cursor() == text.len() && !rendered_cursor && used < text_width {
+        spans.push(Span::styled(" ", cursor_style));
+    }
+
+    Line::from(spans)
 }
 
 pub(super) fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
@@ -68,16 +259,7 @@ pub(super) fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rec
 
     render_modal_header(frame, rows[0], title, &app.palette);
 
-    let input_rect = Rect::new(rows[2].x, rows[2].y, rows[2].width, 1);
-    frame.render_widget(Clear, input_rect);
-    frame.render_widget(
-        Paragraph::new(format!(" {}█", app.name_input)).style(
-            Style::default()
-                .fg(app.palette.text)
-                .bg(app.palette.surface0),
-        ),
-        input_rect,
-    );
+    render_text_input(app, frame, rename_input_rect(inner));
 
     let (save_rect, clear_rect, cancel_rect) = rename_button_rects(inner);
 
@@ -264,16 +446,7 @@ pub(super) fn render_new_linked_worktree_overlay(app: &AppState, frame: &mut Fra
         Paragraph::new(" branch").style(Style::default().fg(app.palette.overlay0)),
         rows[1],
     );
-    let input_rect = Rect::new(rows[2].x, rows[2].y, rows[2].width, 1);
-    frame.render_widget(Clear, input_rect);
-    frame.render_widget(
-        Paragraph::new(format!(" {}█", app.name_input)).style(
-            Style::default()
-                .fg(app.palette.text)
-                .bg(app.palette.surface0),
-        ),
-        input_rect,
-    );
+    render_text_input(app, frame, new_linked_worktree_input_rect(inner));
 
     let checkout = create.checkout_path.display().to_string();
     frame.render_widget(
@@ -757,10 +930,11 @@ pub(crate) fn confirm_close_button_rects(inner: Rect) -> (Rect, Rect) {
 #[cfg(test)]
 mod tests {
     use crate::{
+        app::text_input::TextInputState,
         app::{state::WorktreeCreateState, AppState},
         workspace::Workspace,
     };
-    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    use ratatui::{backend::TestBackend, layout::Rect, style::Modifier, Terminal};
 
     use super::{confirm_close_overlay_text, render_new_linked_worktree_overlay};
 
@@ -826,6 +1000,88 @@ mod tests {
             .collect::<String>();
 
         assert!(rendered.contains("fatal: a branch named 'foo' already exists"));
+    }
+
+    fn modal_inner(area: Rect, width: u16, height: u16) -> Rect {
+        let popup = super::centered_popup_rect(area, width, height).unwrap();
+        Rect::new(
+            popup.x + 1,
+            popup.y + 1,
+            popup.width.saturating_sub(2),
+            popup.height.saturating_sub(2),
+        )
+    }
+
+    #[test]
+    fn rename_input_renders_reverse_video_cursor_without_literal_block() {
+        let area = Rect::new(0, 0, 80, 20);
+        let mut app = AppState::test_new();
+        app.mode = crate::app::Mode::RenameTab;
+        app.name_input = "abcdef".into();
+        app.name_input.set_cursor("abc".len());
+
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("terminal");
+        terminal
+            .draw(|frame| super::render_rename_overlay(&app, frame, area))
+            .expect("rename overlay should render");
+
+        let inner = modal_inner(area, 56, 7);
+        let input_rect = super::rename_input_rect(inner);
+        let cursor = terminal.backend().buffer()[(input_rect.x + 1 + 3, input_rect.y)].clone();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert_eq!(cursor.symbol(), "d");
+        assert!(cursor.style().add_modifier.contains(Modifier::REVERSED));
+        assert!(!rendered.contains('█'));
+    }
+
+    #[test]
+    fn text_input_view_windows_to_keep_cursor_visible() {
+        let area = Rect::new(0, 0, 80, 20);
+        let inner = modal_inner(area, 56, 7);
+        let input_rect = super::rename_input_rect(inner);
+        let mut app = AppState::test_new();
+        app.mode = crate::app::Mode::RenameTab;
+        app.name_input = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ".into();
+        let view = super::text_input_view(input_rect, &app.name_input);
+
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("terminal");
+        terminal
+            .draw(|frame| super::render_rename_overlay(&app, frame, area))
+            .expect("rename overlay should render");
+        let row = (view.text_rect.x..view.text_rect.x + view.text_rect.width)
+            .map(|x| terminal.backend().buffer()[(x, view.text_rect.y)].symbol())
+            .collect::<String>();
+        let cursor_x = view.text_rect.x + (view.cursor_col - view.window_start_col) as u16;
+        let cursor = terminal.backend().buffer()[(cursor_x, view.text_rect.y)].clone();
+
+        assert!(view.window_start > 0);
+        assert!(!row.contains("abcde"));
+        assert!(cursor.style().add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn text_input_column_mapping_snaps_to_grapheme_boundaries() {
+        let input = TextInputState::with_text("a界b");
+        let view = super::text_input_view(Rect::new(0, 0, 10, 1), &input);
+
+        assert_eq!(super::text_input_byte_offset_for_column(&input, view, 0), 0);
+        assert_eq!(
+            super::text_input_byte_offset_for_column(&input, view, 1),
+            "a".len()
+        );
+        assert_eq!(
+            super::text_input_byte_offset_for_column(&input, view, 3),
+            "a界".len()
+        );
     }
 
     #[test]
