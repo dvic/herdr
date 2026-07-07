@@ -83,6 +83,7 @@ impl TextInputState {
 
     pub(crate) fn insert_str(&mut self, text: &str) -> bool {
         let replace_on_type = self.replace_on_type;
+        let changed_by_replace = replace_on_type && !self.text.is_empty();
         self.disarm();
         if replace_on_type {
             self.text.clear();
@@ -92,7 +93,7 @@ impl TextInputState {
         let sanitized: String = text.chars().filter(|ch| !ch.is_control()).collect();
         if sanitized.is_empty() {
             self.resnap_cursor();
-            return false;
+            return changed_by_replace;
         }
 
         self.text.insert_str(self.cursor, &sanitized);
@@ -400,6 +401,17 @@ mod tests {
 
         assert_eq!(input.text(), "featurebranch/x");
         assert_eq!(input.cursor(), "featurebranch/x".len());
+        assert!(!input.replace_on_type());
+    }
+
+    #[test]
+    fn control_only_insert_reports_replace_clear_as_text_change() {
+        let mut input = TextInputState::with_replace_on_type("generated");
+
+        assert!(input.insert_str("\n\t\u{7}"));
+
+        assert_eq!(input.text(), "");
+        assert_eq!(input.cursor(), 0);
         assert!(!input.replace_on_type());
     }
 
