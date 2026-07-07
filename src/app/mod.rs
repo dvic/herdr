@@ -18,6 +18,8 @@ mod runtime_mutations;
 mod session;
 pub mod state;
 mod terminal_targets;
+#[allow(dead_code)] // staged pure editor; dialog wiring in the next increment removes this.
+pub(crate) mod text_input;
 mod theme_sync;
 mod worktrees;
 
