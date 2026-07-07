@@ -580,6 +580,9 @@ pub(crate) fn handle_rename_edit_key(state: &mut AppState, key: KeyEvent) -> Tex
             state.name_input.move_end();
             TextEditOutcome::movement()
         }
+        KeyCode::Char(_) if control_char(&key, 'c') => {
+            TextEditOutcome::edit(state.name_input.clear())
+        }
         KeyCode::Char(_) if control_char(&key, 'u') => {
             TextEditOutcome::edit(state.name_input.kill_to_start())
         }

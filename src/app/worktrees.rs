@@ -1222,6 +1222,39 @@ mod tests {
     }
 
     #[test]
+    fn worktree_create_ctrl_c_clears_syncs_and_clears_error_only_on_text_change() {
+        let mut app = app_for_worktree_tests();
+        app.state.worktree_directory = "/repo".into();
+        app.state.mode = Mode::NewLinkedWorktree;
+        app.state.name_input = "branch".into();
+        app.state.worktree_create =
+            Some(sample_worktree_create("branch", false, Some("old error")));
+
+        app.handle_worktree_create_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        let create = app.state.worktree_create.as_ref().unwrap();
+        assert_eq!(app.state.name_input, "");
+        assert_eq!(create.branch, "");
+        assert_eq!(
+            create.checkout_path,
+            crate::worktree::default_checkout_path(
+                &app.state.worktree_directory,
+                &create.repo_name,
+                ""
+            )
+        );
+        assert_eq!(create.error, None);
+
+        app.state.worktree_create.as_mut().unwrap().error = Some("stays".into());
+        app.handle_worktree_create_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        let create = app.state.worktree_create.as_ref().unwrap();
+        assert_eq!(app.state.name_input, "");
+        assert_eq!(create.branch, "");
+        assert_eq!(create.error.as_deref(), Some("stays"));
+    }
+
+    #[test]
     fn worktree_create_freezes_text_changes_while_creating_including_paste() {
         let mut app = app_for_worktree_tests();
         app.state.mode = Mode::NewLinkedWorktree;

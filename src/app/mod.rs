@@ -3235,6 +3235,28 @@ mod tests {
 
         assert!(handled);
         assert_eq!(app.state.name_input, "ab");
+
+        let handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Left,
+                KeyModifiers::empty(),
+                KeyEventKind::Repeat,
+            ))
+            .await;
+
+        assert!(handled);
+        assert_eq!(app.state.name_input.cursor(), "a".len());
+
+        let handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Right,
+                KeyModifiers::empty(),
+                KeyEventKind::Repeat,
+            ))
+            .await;
+
+        assert!(handled);
+        assert_eq!(app.state.name_input.cursor(), "ab".len());
     }
 
     #[tokio::test]
@@ -3271,6 +3293,28 @@ mod tests {
         );
 
         assert_eq!(app.state.name_input, "ab");
+
+        app.route_client_events(
+            vec![raw_key(
+                KeyCode::Left,
+                KeyModifiers::empty(),
+                KeyEventKind::Repeat,
+            )],
+            true,
+        );
+
+        assert_eq!(app.state.name_input.cursor(), "a".len());
+
+        app.route_client_events(
+            vec![raw_key(
+                KeyCode::Right,
+                KeyModifiers::empty(),
+                KeyEventKind::Repeat,
+            )],
+            true,
+        );
+
+        assert_eq!(app.state.name_input.cursor(), "ab".len());
     }
 
     #[test]

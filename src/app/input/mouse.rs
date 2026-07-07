@@ -2558,6 +2558,39 @@ mod tests {
     }
 
     #[test]
+    fn clicking_windowed_rename_input_places_cursor_with_window_offset() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("old")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::RenameWorkspace;
+        app.state.name_input =
+            "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ".into();
+        app.state.name_input.set_replace_on_type(true);
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        let inner = app.state.rename_modal_inner().unwrap();
+        let input = crate::ui::rename_input_rect(inner);
+        let view = crate::ui::text_input_view(input, &app.state.name_input);
+        assert!(view.window_start > 0);
+        assert_eq!(view.window_start, view.window_start_col);
+
+        let visible_column = 4;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            view.text_rect.x + visible_column,
+            view.text_rect.y,
+        ));
+
+        assert_eq!(app.state.mode, Mode::RenameWorkspace);
+        assert_eq!(
+            app.state.name_input.cursor(),
+            view.window_start + visible_column as usize
+        );
+        assert!(!app.state.name_input.replace_on_type());
+    }
+
+    #[test]
     fn clicking_worktree_create_input_places_cursor_without_canceling() {
         let mut app = app_for_mouse_test();
         app.state.mode = Mode::NewLinkedWorktree;
