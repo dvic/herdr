@@ -182,6 +182,51 @@ fn spawn_default_session_server_with_state_home(
     }
 }
 
+fn spawn_server_with_args_and_socket_env(
+    config_home: &Path,
+    runtime_dir: &Path,
+    args: &[&str],
+    api_socket_env: &Path,
+    client_socket_env: &Path,
+) -> SpawnedHerdr {
+    fs::create_dir_all(config_home.join("herdr-dev")).unwrap();
+    fs::create_dir_all(runtime_dir).unwrap();
+    fs::write(
+        config_home.join("herdr-dev/config.toml"),
+        "onboarding = false\n",
+    )
+    .unwrap();
+
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd.env("XDG_CONFIG_HOME", config_home);
+    cmd.env("XDG_RUNTIME_DIR", runtime_dir);
+    if let Some(base) = config_home.parent() {
+        cmd.env("XDG_STATE_HOME", base.join("state"));
+    }
+    cmd.env_remove("HERDR_SESSION");
+    cmd.env("HERDR_SOCKET_PATH", api_socket_env);
+    cmd.env("HERDR_CLIENT_SOCKET_PATH", client_socket_env);
+    cmd.env("SHELL", "/bin/sh");
+
+    let child = pair.slave.spawn_command(cmd).unwrap();
+    register_spawned_herdr_pid(child.process_id());
+    SpawnedHerdr {
+        _master: pair.master,
+        child,
+    }
+}
+
 fn try_request(
     socket_path: &Path,
     request: serde_json::Value,
@@ -688,6 +733,53 @@ fn live_handoff_preserves_installed_plugin_registry() {
         &api_socket,
         serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
     );
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn live_handoff_ignores_leaked_default_socket_env_for_named_session() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let state_home = base.join("state");
+    let runtime_dir = base.join("runtime");
+    let default_session_dir = config_home.join("herdr-dev");
+    let default_api_socket = default_session_dir.join("herdr.sock");
+    let default_client_socket = default_session_dir.join("herdr-client.sock");
+    let work_session_dir = config_home.join("herdr-dev/sessions/work");
+    let work_api_socket = work_session_dir.join("herdr.sock");
+
+    let default_spawned =
+        spawn_default_session_server_with_state_home(&config_home, &runtime_dir, Some(&state_home));
+    wait_for_socket(&default_api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+
+    let work_spawned = spawn_server_with_args_and_socket_env(
+        &config_home,
+        &runtime_dir,
+        &["--session", "work", "server"],
+        &default_api_socket,
+        &default_client_socket,
+    );
+    wait_for_socket(&work_api_socket, Duration::from_secs(10));
+
+    assert_ok(request(
+        &work_api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(work_spawned);
+    wait_for_api(&default_api_socket, Duration::from_secs(10));
+    wait_for_api(&work_api_socket, Duration::from_secs(10));
+
+    let _ = request(
+        &work_api_socket,
+        serde_json::json!({"id":"test:stop-work","method":"server.stop","params":{}}),
+    );
+    let _ = request(
+        &default_api_socket,
+        serde_json::json!({"id":"test:stop-default","method":"server.stop","params":{}}),
+    );
+    drop(default_spawned);
     cleanup_test_base(&base);
 }
 

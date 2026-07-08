@@ -77,6 +77,17 @@ pub(crate) fn spawn_handoff_import(
         .arg("--handoff-import")
         .arg(socket_path)
         .arg(token)
+        // Bind the sockets this server is actually serving, not whatever session a
+        // leaked HERDR_SOCKET_PATH (inherited from a parent pane) points at. The old
+        // server's resolved api path is authoritative (session-derived for named
+        // sessions, the custom path for a legit default override, else the default);
+        // the child derives its client socket from it. See: non-default-session
+        // live-handoff env leak.
+        .env(
+            crate::api::SOCKET_PATH_ENV_VAR,
+            crate::session::active_api_socket_path(),
+        )
+        .env_remove(crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
