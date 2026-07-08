@@ -135,8 +135,19 @@ fn spawn_named_session_server(
 }
 
 fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> SpawnedHerdr {
+    spawn_default_session_server_with_state_home(config_home, runtime_dir, None)
+}
+
+fn spawn_default_session_server_with_state_home(
+    config_home: &Path,
+    runtime_dir: &Path,
+    state_home: Option<&Path>,
+) -> SpawnedHerdr {
     fs::create_dir_all(config_home.join("herdr-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
+    if let Some(state_home) = state_home {
+        fs::create_dir_all(state_home).unwrap();
+    }
     fs::write(
         config_home.join("herdr-dev/config.toml"),
         "onboarding = false\n",
@@ -155,6 +166,9 @@ fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> Spawn
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
+    if let Some(state_home) = state_home {
+        cmd.env("XDG_STATE_HOME", state_home);
+    }
     cmd.env_remove("HERDR_SESSION");
     cmd.env_remove("HERDR_SOCKET_PATH");
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -617,6 +631,7 @@ fn live_handoff_preserves_installed_plugin_registry() {
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
+    let state_home = base.join("state");
     let runtime_dir = base.join("runtime");
     let api_socket = config_home.join("herdr-dev/herdr.sock");
     let registry_path = config_home.join("herdr-dev/plugins.json");
@@ -640,7 +655,8 @@ fn live_handoff_preserves_installed_plugin_registry() {
         "Live Handoff Third",
     );
 
-    let spawned = spawn_default_session_server(&config_home, &runtime_dir);
+    let spawned =
+        spawn_default_session_server_with_state_home(&config_home, &runtime_dir, Some(&state_home));
     wait_for_socket(&api_socket, Duration::from_secs(10));
     register_runtime_dir(&runtime_dir);
     let server_pid = spawned
