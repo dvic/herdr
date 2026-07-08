@@ -1,5 +1,6 @@
 mod support;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -134,8 +135,19 @@ fn spawn_named_session_server(
 }
 
 fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> SpawnedHerdr {
+    spawn_default_session_server_with_state_home(config_home, runtime_dir, None)
+}
+
+fn spawn_default_session_server_with_state_home(
+    config_home: &Path,
+    runtime_dir: &Path,
+    state_home: Option<&Path>,
+) -> SpawnedHerdr {
     fs::create_dir_all(config_home.join("herdr-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
+    if let Some(state_home) = state_home {
+        fs::create_dir_all(state_home).unwrap();
+    }
     fs::write(
         config_home.join("herdr-dev/config.toml"),
         "onboarding = false\n",
@@ -154,6 +166,9 @@ fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> Spawn
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
+    if let Some(state_home) = state_home {
+        cmd.env("XDG_STATE_HOME", state_home);
+    }
     cmd.env_remove("HERDR_SESSION");
     cmd.env_remove("HERDR_SOCKET_PATH");
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -247,6 +262,82 @@ fn wait_for_api(socket_path: &Path, timeout: Duration) {
         "api did not become ready at {}; last error: {last_error}",
         socket_path.display()
     );
+}
+
+fn write_plugin_manifest(root: &Path, plugin_id: &str, name: &str) {
+    fs::create_dir_all(root).unwrap();
+    fs::write(
+        root.join("herdr-plugin.toml"),
+        format!(
+            r#"
+id = "{plugin_id}"
+name = "{name}"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+description = "Live handoff test plugin"
+platforms = ["linux", "macos", "windows"]
+"#
+        ),
+    )
+    .unwrap();
+}
+
+fn link_plugin(socket_path: &Path, root: &Path) -> String {
+    let response = request(
+        socket_path,
+        serde_json::json!({
+            "id": "test:plugin:link",
+            "method": "plugin.link",
+            "params": {
+                "path": root.display().to_string(),
+                "enabled": true
+            }
+        }),
+    );
+    assert_ok(response.clone());
+    response["result"]["plugin"]["plugin_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("plugin.link response missing plugin id: {response}"))
+        .to_string()
+}
+
+fn plugin_list_ids(socket_path: &Path) -> BTreeSet<String> {
+    let response = request(
+        socket_path,
+        serde_json::json!({
+            "id": "test:plugin:list",
+            "method": "plugin.list",
+            "params": {}
+        }),
+    );
+    assert_ok(response.clone());
+    response["result"]["plugins"]
+        .as_array()
+        .unwrap_or_else(|| panic!("plugin.list response missing plugins: {response}"))
+        .iter()
+        .map(|plugin| {
+            plugin["plugin_id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("plugin.list entry missing plugin_id: {plugin}"))
+                .to_string()
+        })
+        .collect()
+}
+
+fn plugin_registry_ids(path: &Path) -> BTreeSet<String> {
+    let content = fs::read_to_string(path).unwrap();
+    serde_json::from_str::<serde_json::Value>(&content)
+        .unwrap()
+        .as_array()
+        .unwrap_or_else(|| panic!("plugin registry is not an array: {content}"))
+        .iter()
+        .map(|plugin| {
+            plugin["plugin_id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("plugin registry entry missing plugin_id: {plugin}"))
+                .to_string()
+        })
+        .collect()
 }
 
 fn wait_for_output(socket_path: &Path, pane_id: &str, needle: &str) {
@@ -527,6 +618,71 @@ fn live_handoff_preserves_named_session_socket_paths() {
         !config_home.join("herdr-dev/herdr.sock").exists(),
         "named handoff unexpectedly bound the default session API socket"
     );
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn live_handoff_preserves_installed_plugin_registry() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let state_home = base.join("state");
+    let runtime_dir = base.join("runtime");
+    let api_socket = config_home.join("herdr-dev/herdr.sock");
+    let registry_path = config_home.join("herdr-dev/plugins.json");
+    let first_root = base.join("plugins/first");
+    let second_root = base.join("plugins/second");
+    let third_root = base.join("plugins/third");
+
+    write_plugin_manifest(
+        &first_root,
+        "example.live-handoff-first",
+        "Live Handoff First",
+    );
+    write_plugin_manifest(
+        &second_root,
+        "example.live-handoff-second",
+        "Live Handoff Second",
+    );
+    write_plugin_manifest(
+        &third_root,
+        "example.live-handoff-third",
+        "Live Handoff Third",
+    );
+
+    let spawned =
+        spawn_default_session_server_with_state_home(&config_home, &runtime_dir, Some(&state_home));
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let server_pid = spawned
+        .child
+        .process_id()
+        .expect("test server should expose pid");
+
+    let first_id = link_plugin(&api_socket, &first_root);
+    let second_id = link_plugin(&api_socket, &second_root);
+    let expected_before_handoff = BTreeSet::from([first_id.clone(), second_id.clone()]);
+    assert_eq!(plugin_list_ids(&api_socket), expected_before_handoff);
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    let _replacement_pid =
+        wait_for_replacement_server_pid(&runtime_dir, server_pid, Duration::from_secs(10));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    assert_eq!(plugin_list_ids(&api_socket), expected_before_handoff);
+
+    let third_id = link_plugin(&api_socket, &third_root);
+    let expected_after_third = BTreeSet::from([first_id, second_id, third_id]);
+    assert_eq!(plugin_registry_ids(&registry_path), expected_after_third);
 
     let _ = request(
         &api_socket,
