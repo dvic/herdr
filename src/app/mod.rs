@@ -18,6 +18,7 @@ mod runtime_mutations;
 mod session;
 pub mod state;
 mod terminal_targets;
+pub(crate) mod text_input;
 mod theme_sync;
 mod worktrees;
 
@@ -197,6 +198,44 @@ fn repeat_key_identity(
     key: &crate::input::TerminalKey,
 ) -> (crossterm::event::KeyCode, crossterm::event::KeyModifiers) {
     (key.code, key.modifiers)
+}
+
+fn text_input_modal_allows_repeat(state: &AppState, key: &crate::input::TerminalKey) -> bool {
+    if !matches!(
+        state.mode,
+        Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::NewLinkedWorktree
+    ) {
+        return false;
+    }
+
+    let key_event = key.as_key_event();
+    if input::is_modal_paste_shortcut(&key_event) {
+        return false;
+    }
+
+    match key_event.code {
+        crossterm::event::KeyCode::Left
+        | crossterm::event::KeyCode::Right
+        | crossterm::event::KeyCode::Home
+        | crossterm::event::KeyCode::End
+        | crossterm::event::KeyCode::Delete
+        | crossterm::event::KeyCode::Backspace => true,
+        crossterm::event::KeyCode::Char(c) => {
+            key_event
+                .modifiers
+                .difference(crossterm::event::KeyModifiers::SHIFT)
+                .is_empty()
+                || key_event
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                    && matches!(c.to_ascii_lowercase(), 'a' | 'e' | 'h' | 'k' | 'u' | 'w')
+                || key_event
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::ALT)
+                    && matches!(c.to_ascii_lowercase(), 'b' | 'f')
+        }
+        _ => false,
+    }
 }
 
 fn auto_updates_enabled(no_session: bool) -> bool {
@@ -533,8 +572,7 @@ impl App {
             worktree_directory,
             collapsed_space_keys,
             request_complete_onboarding: false,
-            name_input: String::new(),
-            name_input_replace_on_type: false,
+            name_input: crate::app::text_input::TextInputState::new(),
             release_notes: None,
             product_announcement: startup_product_announcement.map(|announcement| {
                 state::ProductAnnouncementState {
@@ -1552,8 +1590,10 @@ impl App {
                                 && !self.suppressed_repeat_keys.contains(&key_id)
                             {
                                 self.handle_terminal_key_headless(key);
+                            } else if text_input_modal_allows_repeat(&self.state, &key) {
+                                self.handle_non_terminal_key_headless(key);
                             }
-                            // Repeats in non-terminal modes are ignored
+                            // Other non-terminal repeats are ignored
                             // (same as monolithic behavior).
                         }
                         crossterm::event::KeyEventKind::Release => {
@@ -1622,7 +1662,8 @@ impl App {
     /// since the server doesn't have the async context of the monolithic App.
     fn handle_non_terminal_key_headless(&mut self, key: crate::input::TerminalKey) {
         let key_event = key.as_key_event();
-        if input::modal_paste_target_active(&self.state)
+        if key_event.kind == crossterm::event::KeyEventKind::Press
+            && input::modal_paste_target_active(&self.state)
             && input::is_modal_paste_shortcut(&key_event)
         {
             if let Some(text) = crate::platform::read_clipboard_text() {
@@ -1719,6 +1760,17 @@ mod tests {
         crate::raw_input::RawInputEvent::Key(
             crate::input::TerminalKey::new(code, modifiers).with_kind(kind),
         )
+    }
+
+    fn modal_paste_modifier() -> KeyModifiers {
+        #[cfg(target_os = "macos")]
+        {
+            KeyModifiers::SUPER
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            KeyModifiers::CONTROL
+        }
     }
 
     fn release_notes_state() -> state::ReleaseNotesState {
@@ -3178,6 +3230,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeat_key_events_edit_text_input_modals() {
+        let mut app = test_app();
+        app.state.mode = Mode::RenameTab;
+        app.state.name_input = "abc".into();
+
+        let handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Backspace,
+                KeyModifiers::empty(),
+                KeyEventKind::Repeat,
+            ))
+            .await;
+
+        assert!(handled);
+        assert_eq!(app.state.name_input, "ab");
+
+        let handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Left,
+                KeyModifiers::empty(),
+                KeyEventKind::Repeat,
+            ))
+            .await;
+
+        assert!(handled);
+        assert_eq!(app.state.name_input.cursor(), "a".len());
+
+        let handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Right,
+                KeyModifiers::empty(),
+                KeyEventKind::Repeat,
+            ))
+            .await;
+
+        assert!(handled);
+        assert_eq!(app.state.name_input.cursor(), "ab".len());
+    }
+
+    #[tokio::test]
+    async fn repeat_modal_paste_shortcut_is_ignored() {
+        let mut app = test_app();
+        app.state.mode = Mode::RenameTab;
+        app.state.name_input = "abc".into();
+
+        let handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Char('v'),
+                modal_paste_modifier(),
+                KeyEventKind::Repeat,
+            ))
+            .await;
+
+        assert!(!handled);
+        assert_eq!(app.state.name_input, "abc");
+    }
+
+    #[test]
+    fn route_client_events_allows_text_input_repeats() {
+        let mut app = test_app();
+        app.state.mode = Mode::RenameTab;
+        app.state.name_input = "abc".into();
+
+        app.route_client_events(
+            vec![raw_key(
+                KeyCode::Backspace,
+                KeyModifiers::empty(),
+                KeyEventKind::Repeat,
+            )],
+            true,
+        );
+
+        assert_eq!(app.state.name_input, "ab");
+
+        app.route_client_events(
+            vec![raw_key(
+                KeyCode::Left,
+                KeyModifiers::empty(),
+                KeyEventKind::Repeat,
+            )],
+            true,
+        );
+
+        assert_eq!(app.state.name_input.cursor(), "a".len());
+
+        app.route_client_events(
+            vec![raw_key(
+                KeyCode::Right,
+                KeyModifiers::empty(),
+                KeyEventKind::Repeat,
+            )],
+            true,
+        );
+
+        assert_eq!(app.state.name_input.cursor(), "ab".len());
+    }
+
+    #[test]
+    fn route_client_events_keeps_non_text_repeats_dropped() {
+        let mut app = test_app();
+        app.state.mode = Mode::ReleaseNotes;
+        app.state.release_notes = Some(release_notes_state());
+
+        app.route_client_events(
+            vec![raw_key(
+                KeyCode::Enter,
+                KeyModifiers::empty(),
+                KeyEventKind::Repeat,
+            )],
+            true,
+        );
+
+        assert_eq!(app.state.mode, Mode::ReleaseNotes);
+        assert!(app.state.release_notes.is_some());
+    }
+
+    #[test]
+    fn route_client_events_ignores_repeat_modal_paste_shortcut() {
+        let mut app = test_app();
+        app.state.mode = Mode::RenameTab;
+        app.state.name_input = "abc".into();
+
+        app.route_client_events(
+            vec![raw_key(
+                KeyCode::Char('v'),
+                modal_paste_modifier(),
+                KeyEventKind::Repeat,
+            )],
+            true,
+        );
+
+        assert_eq!(app.state.name_input, "abc");
+    }
+
+    #[tokio::test]
     async fn modal_press_does_not_leak_repeat_into_terminal_mode() {
         let mut app = test_app();
         app.state.workspaces = vec![Workspace::test_new("test")];
@@ -4582,12 +4769,12 @@ last_pane = "prefix+tab"
         app.state.selected = 0;
         app.state.mode = Mode::RenameTab;
         app.state.name_input = "2".into();
-        app.state.name_input_replace_on_type = true;
+        app.state.name_input.set_replace_on_type(true);
 
         app.route_client_input(b"\x1b[200~feature/logs\x1b[201~".to_vec());
 
         assert_eq!(app.state.name_input, "feature/logs");
-        assert!(!app.state.name_input_replace_on_type);
+        assert!(!app.state.name_input.replace_on_type());
     }
 
     #[test]
@@ -4646,7 +4833,7 @@ last_pane = "prefix+tab"
         let mut app = test_app();
         app.state.mode = Mode::NewLinkedWorktree;
         app.state.name_input = "generated-branch".into();
-        app.state.name_input_replace_on_type = true;
+        app.state.name_input.set_replace_on_type(true);
         app.state.worktree_create = Some(state::WorktreeCreateState {
             source_workspace_id: "source".into(),
             source_checkout_path: "/repo/herdr".into(),

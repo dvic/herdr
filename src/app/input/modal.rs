@@ -8,6 +8,7 @@ use crate::{
         state::{
             AppState, ContextMenuKind, ContextMenuState, MenuListState, Mode, NavigatorStateFilter,
         },
+        text_input::TextInputState,
         App,
     },
     input::TerminalKey,
@@ -304,9 +305,9 @@ pub(super) fn open_rename_workspace(
 ) {
     state.selected = ws_idx;
     state.rename_pane_target = None;
-    state.name_input =
-        state.workspaces[ws_idx].display_name_from(&state.terminals, terminal_runtimes);
-    state.name_input_replace_on_type = false;
+    state.name_input = TextInputState::with_text(
+        state.workspaces[ws_idx].display_name_from(&state.terminals, terminal_runtimes),
+    );
     state.mode = Mode::RenameWorkspace;
 }
 
@@ -316,8 +317,11 @@ pub(super) fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool
     state.rename_pane_target = None;
     if let Some(ws) = state.active.and_then(|i| state.workspaces.get(i)) {
         if let Some(name) = ws.active_tab_display_name() {
-            state.name_input = name;
-            state.name_input_replace_on_type = replace_on_type;
+            state.name_input = if replace_on_type {
+                TextInputState::with_replace_on_type(name)
+            } else {
+                TextInputState::with_text(name)
+            };
             state.mode = Mode::RenameTab;
         }
     }
@@ -334,10 +338,14 @@ pub(super) fn open_rename_pane(state: &mut AppState, pane_id: crate::layout::Pan
     state.creating_new_tab = false;
     state.requested_new_tab_name = None;
     state.rename_pane_target = Some(pane_id);
-    state.name_input = terminal
+    let name = terminal
         .and_then(|t| t.manual_label.clone())
         .unwrap_or_default();
-    state.name_input_replace_on_type = terminal.and_then(|t| t.manual_label.as_ref()).is_none();
+    state.name_input = if terminal.and_then(|t| t.manual_label.as_ref()).is_none() {
+        TextInputState::with_replace_on_type(name)
+    } else {
+        TextInputState::with_text(name)
+    };
     state.mode = Mode::RenamePane;
 }
 
@@ -353,8 +361,7 @@ pub(super) fn open_new_tab_dialog(state: &mut AppState) {
     state.creating_new_tab = true;
     state.requested_new_tab_name = None;
     state.rename_pane_target = None;
-    state.name_input = next_new_tab_default_name(state);
-    state.name_input_replace_on_type = true;
+    state.name_input = TextInputState::with_replace_on_type(next_new_tab_default_name(state));
     state.mode = Mode::RenameTab;
 }
 
@@ -418,7 +425,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
     match action {
         ModalAction::Save => {
             let new_name = if state.name_input.trim().is_empty() {
-                state.name_input.clone()
+                state.name_input.text().to_string()
             } else {
                 state.name_input.trim().to_string()
             };
@@ -489,115 +496,137 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             state.creating_new_tab = false;
             state.rename_pane_target = None;
             state.name_input.clear();
-            state.name_input_replace_on_type = false;
             leave_modal(state);
         }
         ModalAction::Clear => {
             state.name_input.clear();
-            state.name_input_replace_on_type = false;
         }
         ModalAction::Cancel => {
             state.creating_new_tab = false;
             state.requested_new_tab_name = None;
             state.rename_pane_target = None;
             state.name_input.clear();
-            state.name_input_replace_on_type = false;
             leave_modal(state);
         }
         _ => {}
     }
 }
 
-fn clear_rename_input(state: &mut AppState) {
-    state.name_input.clear();
-    state.name_input_replace_on_type = false;
-}
-
-pub(crate) fn insert_rename_input_text(state: &mut AppState, text: &str) {
-    if state.name_input_replace_on_type {
-        clear_rename_input(state);
-    }
-    state.name_input.push_str(text);
-}
-
-fn delete_rename_input_char(state: &mut AppState) {
-    if state.name_input_replace_on_type {
-        clear_rename_input(state);
-    } else {
-        state.name_input.pop();
-    }
+pub(crate) fn insert_rename_input_text(state: &mut AppState, text: &str) -> bool {
+    state.name_input.insert_str(text)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RenameWordDeleteClass {
-    Word,
-    Separator,
+pub(crate) struct TextEditOutcome {
+    pub(crate) consumed: bool,
+    pub(crate) text_changed: bool,
 }
 
-fn rename_word_delete_class(ch: char) -> RenameWordDeleteClass {
-    if ch.is_alphanumeric() || ch == '_' {
-        RenameWordDeleteClass::Word
-    } else {
-        RenameWordDeleteClass::Separator
-    }
-}
-
-fn delete_rename_input_word(state: &mut AppState) {
-    if state.name_input_replace_on_type {
-        clear_rename_input(state);
-        return;
-    }
-
-    while state
-        .name_input
-        .chars()
-        .last()
-        .is_some_and(char::is_whitespace)
-    {
-        state.name_input.pop();
-    }
-
-    let Some(class) = state
-        .name_input
-        .chars()
-        .last()
-        .map(rename_word_delete_class)
-    else {
-        return;
-    };
-
-    while state
-        .name_input
-        .chars()
-        .last()
-        .is_some_and(|ch| !ch.is_whitespace() && rename_word_delete_class(ch) == class)
-    {
-        state.name_input.pop();
-    }
-}
-
-fn handle_rename_edit_key(state: &mut AppState, key: KeyEvent) {
-    match key.code {
-        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            clear_rename_input(state);
+impl TextEditOutcome {
+    fn ignored() -> Self {
+        Self {
+            consumed: false,
+            text_changed: false,
         }
+    }
+
+    fn edit(text_changed: bool) -> Self {
+        Self {
+            consumed: true,
+            text_changed,
+        }
+    }
+
+    fn movement() -> Self {
+        Self {
+            consumed: true,
+            text_changed: false,
+        }
+    }
+}
+
+fn control_char(key: &KeyEvent, expected: char) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&expected))
+}
+
+fn alt_char(key: &KeyEvent, expected: char) -> bool {
+    key.modifiers.contains(KeyModifiers::ALT)
+        && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&expected))
+}
+
+pub(crate) fn handle_rename_edit_key(state: &mut AppState, key: KeyEvent) -> TextEditOutcome {
+    match key.code {
+        KeyCode::Char(_) if control_char(&key, 'a') => {
+            state.name_input.move_start();
+            TextEditOutcome::movement()
+        }
+        KeyCode::Char(_) if control_char(&key, 'e') => {
+            state.name_input.move_end();
+            TextEditOutcome::movement()
+        }
+        KeyCode::Char(_) if control_char(&key, 'c') => {
+            TextEditOutcome::edit(state.name_input.clear())
+        }
+        KeyCode::Char(_) if control_char(&key, 'u') => {
+            TextEditOutcome::edit(state.name_input.kill_to_start())
+        }
+        KeyCode::Char(_) if control_char(&key, 'k') => {
+            TextEditOutcome::edit(state.name_input.kill_to_end())
+        }
+        KeyCode::Char(_) if control_char(&key, 'w') => {
+            TextEditOutcome::edit(state.name_input.delete_word_back())
+        }
+        KeyCode::Char(_) if control_char(&key, 'h') => {
+            TextEditOutcome::edit(state.name_input.backspace())
+        }
+        KeyCode::Char(_) if alt_char(&key, 'b') => {
+            state.name_input.move_word_left();
+            TextEditOutcome::movement()
+        }
+        KeyCode::Char(_) if alt_char(&key, 'f') => {
+            state.name_input.move_word_right();
+            TextEditOutcome::movement()
+        }
+        KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.name_input.move_word_left();
+            TextEditOutcome::movement()
+        }
+        KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.name_input.move_word_right();
+            TextEditOutcome::movement()
+        }
+        KeyCode::Left => {
+            state.name_input.move_left();
+            TextEditOutcome::movement()
+        }
+        KeyCode::Right => {
+            state.name_input.move_right();
+            TextEditOutcome::movement()
+        }
+        KeyCode::Home => {
+            state.name_input.move_start();
+            TextEditOutcome::movement()
+        }
+        KeyCode::End => {
+            state.name_input.move_end();
+            TextEditOutcome::movement()
+        }
+        KeyCode::Delete => TextEditOutcome::edit(state.name_input.delete_forward()),
         KeyCode::Backspace if key.modifiers.contains(KeyModifiers::SUPER) => {
-            clear_rename_input(state);
+            TextEditOutcome::edit(state.name_input.kill_to_start())
         }
         KeyCode::Backspace
             if key.modifiers.contains(KeyModifiers::CONTROL)
                 || key.modifiers.contains(KeyModifiers::ALT) =>
         {
-            delete_rename_input_word(state);
+            TextEditOutcome::edit(state.name_input.delete_word_back())
         }
-        KeyCode::Char('h' | 'w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            delete_rename_input_word(state);
-        }
-        KeyCode::Backspace => delete_rename_input_char(state),
+        KeyCode::Backspace => TextEditOutcome::edit(state.name_input.backspace()),
         KeyCode::Char(c) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
-            insert_rename_input_text(state, &c.to_string());
+            TextEditOutcome::edit(insert_rename_input_text(state, &c.to_string()))
         }
-        _ => {}
+        _ => TextEditOutcome::ignored(),
     }
 }
 
@@ -910,7 +939,7 @@ impl App {
 
     fn save_rename_modal_via_api(&mut self) {
         let new_name = if self.state.name_input.trim().is_empty() {
-            self.state.name_input.clone()
+            self.state.name_input.text().to_string()
         } else {
             self.state.name_input.trim().to_string()
         };
@@ -995,7 +1024,6 @@ impl App {
             ModalAction::Save => self.save_rename_modal_via_api(),
             ModalAction::Clear => {
                 self.state.name_input.clear();
-                self.state.name_input_replace_on_type = false;
             }
             ModalAction::Cancel => cancel_rename_modal(&mut self.state),
             _ => {}
@@ -1258,7 +1286,6 @@ fn cancel_rename_modal(state: &mut AppState) {
     state.requested_new_tab_name = None;
     state.rename_pane_target = None;
     state.name_input.clear();
-    state.name_input_replace_on_type = false;
     leave_modal(state);
 }
 
@@ -1497,14 +1524,14 @@ mod tests {
         let mut state = state_with_workspaces(&["test"]);
         state.mode = Mode::RenameTab;
         state.name_input = "2".into();
-        state.name_input_replace_on_type = true;
+        state.name_input.set_replace_on_type(true);
 
         handle_rename_key(
             &mut state,
             KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty()),
         );
         assert_eq!(state.name_input, "n");
-        assert!(!state.name_input_replace_on_type);
+        assert!(!state.name_input.replace_on_type());
 
         handle_rename_key(
             &mut state,
@@ -1518,12 +1545,12 @@ mod tests {
         let mut state = state_with_workspaces(&["test"]);
         state.mode = Mode::RenameTab;
         state.name_input = "2".into();
-        state.name_input_replace_on_type = true;
+        state.name_input.set_replace_on_type(true);
 
         insert_rename_input_text(&mut state, "feature/logs");
 
         assert_eq!(state.name_input, "feature/logs");
-        assert!(!state.name_input_replace_on_type);
+        assert!(!state.name_input.replace_on_type());
 
         insert_rename_input_text(&mut state, "-copy");
 
@@ -1560,7 +1587,7 @@ mod tests {
             &mut state,
             KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
         );
-        assert_eq!(state.name_input, "website-");
+        assert_eq!(state.name_input, "website-zer");
 
         state.name_input = "website-zero".into();
         handle_rename_key(
@@ -1584,22 +1611,112 @@ mod tests {
     }
 
     #[test]
-    fn rename_modal_does_not_insert_modified_shortcut_chars() {
+    fn rename_modal_handles_cursor_movement_and_editing() {
         let mut state = state_with_workspaces(&["test"]);
         state.mode = Mode::RenameWorkspace;
-        state.name_input = "website".into();
+        state.name_input = "alpha beta-gamma".into();
 
         handle_rename_key(
             &mut state,
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
         );
-        assert_eq!(state.name_input, "website");
-
         handle_rename_key(
             &mut state,
             KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT),
         );
-        assert_eq!(state.name_input, "websiteZ");
+        assert_eq!(state.name_input, "Zalpha beta-gamma");
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::End, KeyModifiers::empty()),
+        );
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
+        );
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('!'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(state.name_input, "Zalpha beta-gamm!a");
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()),
+        );
+        assert_eq!(state.name_input, "Zalpha beta-gamm!");
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL),
+        );
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL),
+        );
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.name_input, "Zalpha beta-");
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Home, KeyModifiers::empty()),
+        );
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT),
+        );
+        assert_eq!(state.name_input.cursor(), "Zalpha".len());
+    }
+
+    #[test]
+    fn rename_modal_movement_disarms_replace_on_type() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameWorkspace;
+        state.name_input = "prefill".into();
+        state.name_input.set_replace_on_type(true);
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
+        );
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.name_input, "prefilxl");
+        assert!(!state.name_input.replace_on_type());
+    }
+
+    #[test]
+    fn rename_modal_ctrl_u_kills_to_start() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameWorkspace;
+        state.name_input = "prefix suffix".into();
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT),
+        );
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(state.name_input, "suffix");
+    }
+
+    #[test]
+    fn rename_modal_paste_sanitizes_control_characters() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameWorkspace;
+
+        insert_rename_input_text(&mut state, "line\n\tbranch\u{7}");
+
+        assert_eq!(state.name_input, "linebranch");
     }
 
     #[test]
@@ -1739,7 +1856,7 @@ mod tests {
 
         assert_eq!(state.mode, Mode::RenameTab);
         assert_eq!(state.name_input, "2");
-        assert!(state.name_input_replace_on_type);
+        assert!(state.name_input.replace_on_type());
     }
 
     #[test]
@@ -1764,7 +1881,7 @@ mod tests {
         let mut state = state_with_workspaces(&["test"]);
         open_new_tab_dialog(&mut state);
         state.name_input = "logs".into();
-        state.name_input_replace_on_type = false;
+        state.name_input.set_replace_on_type(false);
 
         handle_rename_key(
             &mut state,

@@ -4,7 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
+    input::handle_rename_edit_key,
     state::{WorktreeCreateState, WorktreeOpenEntry, WorktreeOpenState, WorktreeRemoveState},
+    text_input::TextInputState,
     App, Mode,
 };
 #[cfg(test)]
@@ -108,8 +110,7 @@ impl App {
             "opening worktree dialog"
         );
         self.state.selected = ws_idx;
-        self.state.name_input = branch.clone();
-        self.state.name_input_replace_on_type = true;
+        self.state.name_input = TextInputState::with_replace_on_type(branch.clone());
         self.state.worktree_create = Some(WorktreeCreateState {
             source_workspace_id,
             source_checkout_path,
@@ -248,29 +249,37 @@ impl App {
                 self.close_worktree_create_dialog();
             }
             KeyCode::Enter => self.submit_worktree_create_via_api(),
-            KeyCode::Backspace => {
-                if self.state.name_input_replace_on_type {
-                    self.state.name_input.clear();
-                    self.state.name_input_replace_on_type = false;
-                } else {
-                    self.state.name_input.pop();
+            _ => {
+                if self
+                    .state
+                    .worktree_create
+                    .as_ref()
+                    .is_some_and(|create| create.creating)
+                {
+                    return;
                 }
-                self.sync_worktree_branch_from_input();
+                let outcome = handle_rename_edit_key(&mut self.state, key);
+                if outcome.consumed && outcome.text_changed {
+                    self.sync_worktree_branch_from_input();
+                }
             }
-            KeyCode::Char(c) => {
-                self.insert_worktree_create_text(&c.to_string());
-            }
-            _ => {}
         }
     }
 
-    pub(crate) fn insert_worktree_create_text(&mut self, text: &str) {
-        if self.state.name_input_replace_on_type {
-            self.state.name_input.clear();
-            self.state.name_input_replace_on_type = false;
+    pub(crate) fn insert_worktree_create_text(&mut self, text: &str) -> bool {
+        if self
+            .state
+            .worktree_create
+            .as_ref()
+            .is_some_and(|create| create.creating)
+        {
+            return false;
         }
-        self.state.name_input.push_str(text);
-        self.sync_worktree_branch_from_input();
+        let text_changed = self.state.name_input.insert_str(text);
+        if text_changed {
+            self.sync_worktree_branch_from_input();
+        }
+        text_changed
     }
 
     pub(crate) fn handle_worktree_open_key(&mut self, key: KeyEvent) {
@@ -480,7 +489,6 @@ impl App {
     fn close_worktree_create_dialog(&mut self) {
         self.state.worktree_create = None;
         self.state.name_input.clear();
-        self.state.name_input_replace_on_type = false;
         self.state.mode = if self.state.active.is_some() {
             Mode::Terminal
         } else {
@@ -492,7 +500,7 @@ impl App {
         let Some(create) = &mut self.state.worktree_create else {
             return;
         };
-        create.branch = self.state.name_input.clone();
+        create.branch = self.state.name_input.text().to_string();
         create.checkout_path = crate::worktree::default_checkout_path(
             &self.state.worktree_directory,
             &create.repo_name,
@@ -517,7 +525,7 @@ impl App {
         }
 
         create.branch = branch.clone();
-        self.state.name_input = branch.clone();
+        self.state.name_input = branch.clone().into();
         create.checkout_path = crate::worktree::default_checkout_path(
             &self.state.worktree_directory,
             &create.repo_name,
@@ -579,7 +587,7 @@ impl App {
         }
 
         create.branch = branch.clone();
-        self.state.name_input = branch.clone();
+        self.state.name_input = branch.clone().into();
         create.checkout_path = crate::worktree::default_checkout_path(
             &self.state.worktree_directory,
             &create.repo_name,
@@ -802,7 +810,6 @@ impl App {
                 let source_repo_root = create.source_repo_root.clone();
                 self.state.worktree_create = None;
                 self.state.name_input.clear();
-                self.state.name_input_replace_on_type = false;
                 let source_membership = source_existing_membership.unwrap_or(
                     crate::workspace::WorktreeSpaceMembership {
                         key: repo_key.clone(),
@@ -1096,6 +1103,29 @@ mod tests {
         }
     }
 
+    fn sample_worktree_create(
+        branch: &str,
+        creating: bool,
+        error: Option<&str>,
+    ) -> WorktreeCreateState {
+        WorktreeCreateState {
+            source_workspace_id: "source".into(),
+            source_checkout_path: "/repo/herdr".into(),
+            source_existing_membership: None,
+            source_repo_root: "/repo/herdr".into(),
+            repo_key: "repo-key".into(),
+            repo_name: "herdr".into(),
+            branch: branch.into(),
+            checkout_path: crate::worktree::default_checkout_path(
+                &std::path::PathBuf::from("/repo"),
+                "herdr",
+                branch,
+            ),
+            error: error.map(str::to_string),
+            creating,
+        }
+    }
+
     #[tokio::test]
     async fn ui_create_workspace_emits_initial_workspace_tab_and_pane_events() {
         let event_hub = crate::api::EventHub::default();
@@ -1139,7 +1169,7 @@ mod tests {
     fn worktree_create_replaces_prefilled_branch_on_paste_and_syncs_state() {
         let mut app = app_for_worktree_tests();
         app.state.name_input = "generated-branch".into();
-        app.state.name_input_replace_on_type = true;
+        app.state.name_input.set_replace_on_type(true);
         app.state.worktree_create = Some(WorktreeCreateState {
             source_workspace_id: "source".into(),
             source_checkout_path: "/repo/herdr".into(),
@@ -1156,7 +1186,7 @@ mod tests {
         app.insert_worktree_create_text("feature/linear-302");
 
         assert_eq!(app.state.name_input, "feature/linear-302");
-        assert!(!app.state.name_input_replace_on_type);
+        assert!(!app.state.name_input.replace_on_type());
         assert_eq!(
             app.state
                 .worktree_create
@@ -1164,6 +1194,85 @@ mod tests {
                 .map(|create| create.branch.as_str()),
             Some("feature/linear-302")
         );
+    }
+
+    #[test]
+    fn worktree_create_delegates_line_editing_and_syncs_only_on_text_change() {
+        let mut app = app_for_worktree_tests();
+        app.state.worktree_directory = "/repo".into();
+        app.state.mode = Mode::NewLinkedWorktree;
+        app.state.name_input = "branch".into();
+        app.state.worktree_create =
+            Some(sample_worktree_create("branch", false, Some("old error")));
+
+        app.handle_worktree_create_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+
+        let create = app.state.worktree_create.as_ref().unwrap();
+        assert_eq!(app.state.name_input, "branch");
+        assert_eq!(app.state.name_input.cursor(), 0);
+        assert_eq!(create.branch, "branch");
+        assert_eq!(create.error.as_deref(), Some("old error"));
+
+        app.handle_worktree_create_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()));
+
+        let create = app.state.worktree_create.as_ref().unwrap();
+        assert_eq!(app.state.name_input, "xbranch");
+        assert_eq!(create.branch, "xbranch");
+        assert_eq!(create.error, None);
+    }
+
+    #[test]
+    fn worktree_create_ctrl_c_clears_syncs_and_clears_error_only_on_text_change() {
+        let mut app = app_for_worktree_tests();
+        app.state.worktree_directory = "/repo".into();
+        app.state.mode = Mode::NewLinkedWorktree;
+        app.state.name_input = "branch".into();
+        app.state.worktree_create =
+            Some(sample_worktree_create("branch", false, Some("old error")));
+
+        app.handle_worktree_create_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        let create = app.state.worktree_create.as_ref().unwrap();
+        assert_eq!(app.state.name_input, "");
+        assert_eq!(create.branch, "");
+        assert_eq!(
+            create.checkout_path,
+            crate::worktree::default_checkout_path(
+                &app.state.worktree_directory,
+                &create.repo_name,
+                ""
+            )
+        );
+        assert_eq!(create.error, None);
+
+        app.state.worktree_create.as_mut().unwrap().error = Some("stays".into());
+        app.handle_worktree_create_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        let create = app.state.worktree_create.as_ref().unwrap();
+        assert_eq!(app.state.name_input, "");
+        assert_eq!(create.branch, "");
+        assert_eq!(create.error.as_deref(), Some("stays"));
+    }
+
+    #[test]
+    fn worktree_create_freezes_text_changes_while_creating_including_paste() {
+        let mut app = app_for_worktree_tests();
+        app.state.mode = Mode::NewLinkedWorktree;
+        app.state.name_input = "generated-branch".into();
+        app.state.worktree_create = Some(sample_worktree_create(
+            "generated-branch",
+            true,
+            Some("creating"),
+        ));
+
+        app.handle_worktree_create_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
+        app.handle_worktree_create_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()));
+        assert!(app.paste_into_active_text_input("feature/pasted"));
+
+        let create = app.state.worktree_create.as_ref().unwrap();
+        assert_eq!(app.state.name_input, "generated-branch");
+        assert_eq!(create.branch, "generated-branch");
+        assert_eq!(create.error.as_deref(), Some("creating"));
     }
 
     #[test]

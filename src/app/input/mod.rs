@@ -47,7 +47,7 @@ mod terminal;
 pub(crate) use self::{
     modal::{
         handle_global_menu_key, handle_keybind_help_key, handle_navigator_key,
-        insert_navigator_search_text, insert_rename_input_text,
+        handle_rename_edit_key, insert_navigator_search_text, insert_rename_input_text,
     },
     navigate::terminal_direct_navigation_action,
     settings::open_settings_at,
@@ -69,7 +69,10 @@ use super::App;
 impl App {
     pub(super) async fn handle_key(&mut self, key: TerminalKey) {
         let key_event = key.as_key_event();
-        if modal_paste_target_active(&self.state) && is_modal_paste_shortcut(&key_event) {
+        if key_event.kind == crossterm::event::KeyEventKind::Press
+            && modal_paste_target_active(&self.state)
+            && is_modal_paste_shortcut(&key_event)
+        {
             if let Some(text) = crate::platform::read_clipboard_text() {
                 self.paste_into_active_text_input(&text);
             }
@@ -698,12 +701,12 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::RenameTab;
         app.state.name_input = "2".into();
-        app.state.name_input_replace_on_type = true;
+        app.state.name_input.set_replace_on_type(true);
 
         app.handle_paste("feature/logs".into()).await;
 
         assert_eq!(app.state.name_input, "feature/logs");
-        assert!(!app.state.name_input_replace_on_type);
+        assert!(!app.state.name_input.replace_on_type());
     }
 
     #[tokio::test]
@@ -711,7 +714,7 @@ mod tests {
         let mut app = test_app();
         app.state.mode = Mode::NewLinkedWorktree;
         app.state.name_input = "generated-branch".into();
-        app.state.name_input_replace_on_type = true;
+        app.state.name_input.set_replace_on_type(true);
         app.state.worktree_create = Some(crate::app::state::WorktreeCreateState {
             source_workspace_id: "source".into(),
             source_checkout_path: "/repo/herdr".into(),
