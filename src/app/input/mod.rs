@@ -484,11 +484,15 @@ impl App {
             Ok(true) => return true,
             Ok(false) => {}
             Err(err) => {
-                tracing::warn!(err = %err, url = %url, "failed to invoke plugin link handler");
+                tracing::warn!(err = %err, "failed to invoke plugin link handler");
             }
         }
-        if let Err(err) = crate::platform::open_url(&url) {
-            tracing::warn!(err = %err, url = %url, "failed to open pane URL");
+        if self
+            .event_tx
+            .try_send(crate::events::AppEvent::OpenUrl { url })
+            .is_err()
+        {
+            tracing::warn!("failed to queue web URL open event");
         }
         true
     }

@@ -59,12 +59,25 @@ impl App {
     }
 
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
+        self.handle_internal_event_with_open_url_opener(ev, crate::platform::open_url);
+    }
+
+    fn handle_internal_event_with_open_url_opener(
+        &mut self,
+        ev: AppEvent,
+        opener: impl FnOnce(&str) -> std::io::Result<()>,
+    ) {
         if let AppEvent::ClipboardWrite { content } = ev {
             #[cfg(not(test))]
             crate::selection::write_osc52_bytes(&content);
             #[cfg(test)]
             let _ = content;
             self.show_clipboard_feedback();
+            return;
+        }
+
+        if let AppEvent::OpenUrl { url } = ev {
+            let _ = crate::open_url::dispatch_locally_with(&url, opener);
             return;
         }
 
@@ -935,6 +948,9 @@ impl App {
             Method::NotificationShow(params) => {
                 return self.handle_notification_show(request.id, params);
             }
+            Method::ClientOpenUrl(params) => {
+                return self.handle_client_open_url(request.id, &params.url);
+            }
             Method::ClientWindowTitleSet(_) | Method::ClientWindowTitleClear(_) => {
                 return responses::encode_success(
                     request.id,
@@ -1200,6 +1216,10 @@ impl App {
         )
     }
 
+    fn handle_client_open_url(&mut self, id: String, url: &str) -> String {
+        client_open_url_response_with(id, url, crate::open_url::dispatch_locally)
+    }
+
     fn emit_api_notification_sound(&self, sound: crate::api::schema::NotificationShowSound) {
         if !self.state.local_sound_playback || !self.state.sound.allows(None) {
             return;
@@ -1216,6 +1236,39 @@ impl App {
 
     pub(crate) fn mark_api_notification_shown(&mut self, now: Instant) {
         self.last_api_notification_at = Some(now);
+    }
+}
+
+fn client_open_url_response_with(
+    id: String,
+    url: &str,
+    dispatch: impl FnOnce(&str) -> Result<(), crate::open_url::LocalDispatchError>,
+) -> String {
+    use crate::api::schema::{ClientOpenUrlReason, ResponseResult};
+
+    match dispatch(url) {
+        Ok(()) => responses::encode_success(
+            id,
+            ResponseResult::ClientOpenUrl {
+                delivered: true,
+                reason: ClientOpenUrlReason::DispatchedLocally,
+            },
+        ),
+        Err(crate::open_url::LocalDispatchError::Invalid) => responses::encode_error(
+            id,
+            "invalid_params",
+            "url must be an absolute HTTP(S) URL with a host and valid encoding",
+        ),
+        Err(crate::open_url::LocalDispatchError::Open(error)) => {
+            let _ = error;
+            responses::encode_success(
+                id,
+                ResponseResult::ClientOpenUrl {
+                    delivered: false,
+                    reason: ClientOpenUrlReason::LocalDispatchFailed,
+                },
+            )
+        }
     }
 }
 
@@ -1294,7 +1347,89 @@ pub(super) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::schema::{ClientOpenUrlReason, ErrorResponse, ResponseResult, SuccessResponse};
     use crate::detect::{Agent, AgentState};
+
+    #[test]
+    fn monolithic_client_open_url_reports_the_exact_dispatch_result() {
+        let input = "https://user:pass@example.com/path?q=1#fragment";
+        let success: SuccessResponse = serde_json::from_str(&client_open_url_response_with(
+            "success".into(),
+            input,
+            |url| {
+                assert_eq!(url, input);
+                Ok(())
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            success.result,
+            ResponseResult::ClientOpenUrl {
+                delivered: true,
+                reason: ClientOpenUrlReason::DispatchedLocally,
+            }
+        );
+
+        let failed: SuccessResponse = serde_json::from_str(&client_open_url_response_with(
+            "failed".into(),
+            input,
+            |_| {
+                Err(crate::open_url::LocalDispatchError::Open(
+                    std::io::Error::other("test opener failure"),
+                ))
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            failed.result,
+            ResponseResult::ClientOpenUrl {
+                delivered: false,
+                reason: ClientOpenUrlReason::LocalDispatchFailed,
+            }
+        );
+
+        let invalid: ErrorResponse = serde_json::from_str(&client_open_url_response_with(
+            "invalid".into(),
+            input,
+            |_| Err(crate::open_url::LocalDispatchError::Invalid),
+        ))
+        .unwrap();
+        assert_eq!(invalid.error.code, "invalid_params");
+    }
+
+    #[test]
+    fn monolithic_open_url_event_dispatches_exactly_once_after_validation() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let input = "https://user:pass@example.com/path?q=1#fragment";
+        let mut opened = Vec::new();
+
+        app.handle_internal_event_with_open_url_opener(
+            AppEvent::OpenUrl { url: input.into() },
+            |url| {
+                opened.push(url.to_owned());
+                Ok(())
+            },
+        );
+        assert_eq!(opened, [input]);
+
+        app.handle_internal_event_with_open_url_opener(
+            AppEvent::OpenUrl {
+                url: "file:///tmp/private".into(),
+            },
+            |url| {
+                opened.push(url.to_owned());
+                Ok(())
+            },
+        );
+        assert_eq!(opened, [input]);
+    }
 
     #[cfg(unix)]
     fn init_repo(path: &std::path::Path) {

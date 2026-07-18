@@ -664,6 +664,12 @@ pub enum ServerMessage {
         /// Whether the ASCII input source should be active.
         active: bool,
     },
+
+    /// Open a validated web URL on this full-app client's host.
+    OpenUrl {
+        /// Exact original absolute HTTP(S) URL.
+        url: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1421,6 +1427,18 @@ mod tests {
                 bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
             assert_eq!(msg, decoded);
         }
+    }
+
+    #[test]
+    fn server_open_url_roundtrip_preserves_the_exact_url() {
+        let url = "https://user@example.com/path?one=1&two='quoted'#fragment";
+        let msg = ServerMessage::OpenUrl {
+            url: url.to_owned(),
+        };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
     }
 
     // ---- Framing ----

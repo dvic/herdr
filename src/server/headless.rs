@@ -239,6 +239,13 @@ const CLIENT_ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 // Headless server
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForegroundDelivery {
+    Forwarded,
+    NoForegroundClient,
+    ForwardFailed,
+}
+
 /// The headless server — runs the herdr event loop without a real terminal.
 pub struct HeadlessServer {
     app: app::App,
@@ -1981,6 +1988,39 @@ impl HeadlessServer {
         .unwrap_or_else(|_| "{}".to_string())
     }
 
+    fn handle_client_open_url_api(&mut self, id: String, url: &str) -> String {
+        use api::schema::{ClientOpenUrlReason, ResponseResult};
+
+        if let Err(error) = crate::open_url::validate(url) {
+            crate::open_url::log_validation_failure("server_api", url, error);
+            return serde_json::to_string(&api::schema::ErrorResponse {
+                id,
+                error: api::schema::ErrorBody {
+                    code: "invalid_params".into(),
+                    message: "url must be an absolute HTTP(S) URL with a host and valid encoding"
+                        .into(),
+                },
+            })
+            .unwrap_or_else(|_| "{}".to_string());
+        }
+
+        let delivery = self.deliver_to_foreground_client(ServerMessage::OpenUrl {
+            url: url.to_owned(),
+        });
+        let (delivered, reason) = match delivery {
+            ForegroundDelivery::Forwarded => (true, ClientOpenUrlReason::Forwarded),
+            ForegroundDelivery::NoForegroundClient => {
+                (false, ClientOpenUrlReason::NoForegroundClient)
+            }
+            ForegroundDelivery::ForwardFailed => (false, ClientOpenUrlReason::ForwardFailed),
+        };
+        serde_json::to_string(&api::schema::SuccessResponse {
+            id,
+            result: ResponseResult::ClientOpenUrl { delivered, reason },
+        })
+        .unwrap_or_else(|_| "{}".to_string())
+    }
+
     fn forward_api_notification_sound(&mut self, sound: api::schema::NotificationShowSound) {
         let Some(sound) = sound.to_sound() else {
             return;
@@ -2011,6 +2051,19 @@ impl HeadlessServer {
                     self.app.show_clipboard_feedback();
                 }
                 true
+            }
+            AppEvent::OpenUrl { url } => {
+                match crate::open_url::validate(url) {
+                    Ok(validated) => {
+                        let _ = self.deliver_to_foreground_client(ServerMessage::OpenUrl {
+                            url: validated.as_str().to_owned(),
+                        });
+                    }
+                    Err(error) => {
+                        crate::open_url::log_validation_failure("server_event", url, error);
+                    }
+                }
+                false
             }
             AppEvent::PrefixInputSource { active } => {
                 // Input-source switching is a client-local host side effect; forward it to the
@@ -2383,10 +2436,41 @@ impl HeadlessServer {
 
     /// Sends a client-local side effect to the foreground client only.
     fn send_to_foreground_client(&mut self, msg: ServerMessage) -> bool {
+        self.deliver_to_foreground_client(msg) == ForegroundDelivery::Forwarded
+    }
+
+    fn deliver_to_foreground_client(&mut self, msg: ServerMessage) -> ForegroundDelivery {
         let Some(client_id) = self.foreground_client_id else {
-            return false;
+            return ForegroundDelivery::NoForegroundClient;
         };
-        self.send_to_client(client_id, msg)
+        let Some(client) = self.clients.get(&client_id) else {
+            return ForegroundDelivery::NoForegroundClient;
+        };
+        if !client.is_full_app_client() {
+            return ForegroundDelivery::NoForegroundClient;
+        }
+        let Some(writer) = client.writer.as_ref() else {
+            return ForegroundDelivery::ForwardFailed;
+        };
+        let serialized = match Self::frame_server_message(&msg) {
+            Ok(framed) => framed,
+            Err(_error) => {
+                warn!(
+                    client_id,
+                    "failed to serialize foreground client control message"
+                );
+                return ForegroundDelivery::ForwardFailed;
+            }
+        };
+        if writer.control.send(serialized).is_err() {
+            debug!(
+                client_id,
+                "foreground client control queue rejected message"
+            );
+            self.remove_client_and_resize_if_needed(client_id);
+            return ForegroundDelivery::ForwardFailed;
+        }
+        ForegroundDelivery::Forwarded
     }
 
     /// Sends a message to a specific client. Returns false if the client
@@ -3039,6 +3123,11 @@ impl HeadlessServer {
         }
 
         match &msg.request.method {
+            api::schema::Method::ClientOpenUrl(params) => {
+                let response = self.handle_client_open_url_api(msg.request.id.clone(), &params.url);
+                let _ = msg.respond_to.send(response);
+                return true;
+            }
             api::schema::Method::ClientWindowTitleSet(params) => {
                 let response = self.handle_client_window_title_api(
                     msg.request.id.clone(),
@@ -8412,6 +8501,226 @@ next_tab = ""
             other => panic!("expected ReloadSoundConfig, got {other:?}"),
         }
         assert!(!server.app.state.request_client_config_reload);
+    }
+
+    fn request_open_url(server: &mut HeadlessServer, url: &str) -> api::schema::SuccessResponse {
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        assert!(
+            server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                request: api::schema::Request {
+                    id: "open-url".into(),
+                    method: api::schema::Method::ClientOpenUrl(api::schema::ClientOpenUrlParams {
+                        url: url.into()
+                    },),
+                },
+                respond_to,
+                response_write_complete: None,
+            })
+        );
+        serde_json::from_str(
+            &response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("open URL response"),
+        )
+        .expect("success response")
+    }
+
+    #[test]
+    fn open_url_api_forwards_the_exact_url_to_the_foreground_app_only() {
+        let mut server = test_headless_server();
+        let (background_writer, background_control_rx, _) = test_client_writer();
+        let (foreground_writer, foreground_control_rx, _) = test_client_writer();
+        for (id, writer) in [(1, background_writer), (2, foreground_writer)] {
+            server.clients.insert(
+                id,
+                ClientConnection::new(
+                    (80, 24),
+                    crate::kitty_graphics::HostCellSize::default(),
+                    crate::terminal_theme::TerminalTheme::default(),
+                    None,
+                    id,
+                    RenderEncoding::SemanticFrame,
+                    Some(writer),
+                ),
+            );
+        }
+        server.foreground_client_id = Some(2);
+        let url = "HTTPS://user:secret@bücher.example:8443/a%20b?q=x#frag";
+
+        let response = request_open_url(&mut server, url);
+
+        assert_eq!(
+            response.result,
+            api::schema::ResponseResult::ClientOpenUrl {
+                delivered: true,
+                reason: api::schema::ClientOpenUrlReason::Forwarded,
+            }
+        );
+        match read_server_message(
+            foreground_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("foreground open URL message"),
+        ) {
+            ServerMessage::OpenUrl { url: forwarded } => assert_eq!(forwarded, url),
+            other => panic!("expected OpenUrl, got {other:?}"),
+        }
+        assert!(background_control_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn open_url_api_excludes_observer_and_controller_connections() {
+        for mode in [
+            ClientConnectionMode::TerminalObserve {
+                terminal_id: "observed".into(),
+            },
+            ClientConnectionMode::TerminalAttach {
+                terminal_id: "controlled".into(),
+            },
+        ] {
+            let mut server = test_headless_server();
+            let (writer, control_rx, _) = test_client_writer();
+            server.clients.insert(
+                1,
+                ClientConnection::new_with_mode(
+                    mode,
+                    None,
+                    (80, 24),
+                    crate::kitty_graphics::HostCellSize::default(),
+                    crate::terminal_theme::TerminalTheme::default(),
+                    None,
+                    1,
+                    RenderEncoding::SemanticFrame,
+                    false,
+                    Some(writer),
+                ),
+            );
+            server.foreground_client_id = Some(1);
+
+            let response = request_open_url(&mut server, "https://example.com");
+
+            assert_eq!(
+                response.result,
+                api::schema::ResponseResult::ClientOpenUrl {
+                    delivered: false,
+                    reason: api::schema::ClientOpenUrlReason::NoForegroundClient,
+                }
+            );
+            assert!(control_rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn open_url_api_reports_no_foreground_for_absent_or_stale_foreground_id() {
+        for foreground_client_id in [None, Some(99)] {
+            let mut server = test_headless_server();
+            server.foreground_client_id = foreground_client_id;
+
+            let response = request_open_url(&mut server, "https://example.com");
+
+            assert_eq!(
+                response.result,
+                api::schema::ResponseResult::ClientOpenUrl {
+                    delivered: false,
+                    reason: api::schema::ClientOpenUrlReason::NoForegroundClient,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn open_url_api_reports_forward_failure_for_missing_or_closed_writer() {
+        for closed_writer in [false, true] {
+            let mut server = test_headless_server();
+            let writer = if closed_writer {
+                let (writer, control_rx, _) = test_client_writer();
+                drop(control_rx);
+                Some(writer)
+            } else {
+                None
+            };
+            server.clients.insert(
+                1,
+                ClientConnection::new(
+                    (80, 24),
+                    crate::kitty_graphics::HostCellSize::default(),
+                    crate::terminal_theme::TerminalTheme::default(),
+                    None,
+                    1,
+                    RenderEncoding::SemanticFrame,
+                    writer,
+                ),
+            );
+            server.foreground_client_id = Some(1);
+
+            let response = request_open_url(&mut server, "https://example.com");
+
+            assert_eq!(
+                response.result,
+                api::schema::ResponseResult::ClientOpenUrl {
+                    delivered: false,
+                    reason: api::schema::ClientOpenUrlReason::ForwardFailed,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn open_url_api_rejects_invalid_input_without_echoing_it() {
+        let sentinel = "https://user:secret@example.com/raw space";
+        let mut server = test_headless_server();
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        assert!(
+            server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                request: api::schema::Request {
+                    id: "open-url".into(),
+                    method: api::schema::Method::ClientOpenUrl(api::schema::ClientOpenUrlParams {
+                        url: sentinel.into(),
+                    },),
+                },
+                respond_to,
+                response_write_complete: None,
+            })
+        );
+
+        let response = response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap();
+        let parsed: api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed.error.code, "invalid_params");
+        assert!(!response.contains(sentinel));
+    }
+
+    #[test]
+    fn open_url_event_uses_the_foreground_client_control_queue() {
+        let mut server = test_headless_server();
+        let (writer, control_rx, _) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(writer),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        let url = "https://example.com/from-modified-click?q=1#fragment";
+
+        assert!(
+            !server.handle_internal_event_with_forwarding(AppEvent::OpenUrl { url: url.into() })
+        );
+
+        match read_server_message(
+            control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("foreground open URL event"),
+        ) {
+            ServerMessage::OpenUrl { url: forwarded } => assert_eq!(forwarded, url),
+            other => panic!("expected OpenUrl, got {other:?}"),
+        }
     }
 
     #[test]

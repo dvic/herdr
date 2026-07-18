@@ -43,6 +43,7 @@ The socket API can:
 - list, inspect, read, prompt, wait on, rename, focus, start, and attach agents through CLI helpers
 - report custom agent state from hooks and plugins
 - subscribe to events and wait for output or state changes
+- open an HTTP(S) URL on the foreground full-app client
 - install and uninstall built-in integrations
 - stop the server and reload config
 
@@ -98,7 +99,7 @@ Raw socket method names use dot notation:
 | --- | --- |
 | Server | `ping`, `server.stop`, `server.reload_config`, `server.agent_manifests`, `server.reload_agent_manifests` |
 | Notification | `notification.show` |
-| Client | `client.window_title.set`, `client.window_title.clear` |
+| Client | `client.window_title.set`, `client.window_title.clear`, `client.open_url` |
 | Session | `session.snapshot` |
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
@@ -341,6 +342,17 @@ Set or clear the foreground client's outer terminal window title:
 `client.window_title.clear` restores Herdr's default title. The response is
 `type: "client_window_title"` with `changed` and reason `set`, `cleared`, or
 `no_foreground_client`.
+
+Open an absolute HTTP(S) URL on the foreground full-app client:
+
+```json
+{"id":"req_url","method":"client.open_url","params":{"url":"https://example.com/docs?q=1#install"}}
+```
+
+The response is `type: "client_open_url"` with `delivered` and reason
+`forwarded`, `dispatched_locally`, `no_foreground_client`, `forward_failed`, or
+`local_dispatch_failed`. Observer and controller connections are never
+eligible for delivery.
 
 Worktree methods manage Git checkouts as Herdr workspaces. `worktree.create` creates a checkout and returns the new `workspace`, `tab`, `root_pane`, and `worktree` records. If the requested branch already exists locally, it checks out that branch; otherwise it creates the branch from the requested base or `HEAD`. `worktree.open` opens an existing checkout or returns the already-open workspace. `worktree.remove` runs `git worktree remove` against a linked child workspace and never deletes the branch.
 

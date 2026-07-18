@@ -34,6 +34,7 @@ pub(super) fn command() -> Command {
         .subcommand(worktree_command())
         .subcommand(tab_command())
         .subcommand(notification_command())
+        .subcommand(open_url_command())
         .subcommand(agent_command())
         .subcommand(pane_command())
         .subcommand(wait_command())
@@ -262,6 +263,12 @@ fn notification_command() -> Command {
                 ]))
                 .arg(option("sound", "SOUND").value_parser(["none", "done", "request"])),
         )
+}
+
+fn open_url_command() -> Command {
+    Command::new("open-url")
+        .about("Open an HTTP(S) URL in the foreground client's browser")
+        .arg(required("url", "URL"))
 }
 
 fn agent_command() -> Command {
@@ -913,6 +920,17 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(shells.contains(&"zsh".to_string()));
         assert!(shells.contains(&"fish".to_string()));
+    }
+
+    #[test]
+    fn spec_includes_open_url_argument() {
+        let cmd = super::command();
+        let open_url = command_path(&cmd, &["open-url"]);
+        let url = open_url
+            .get_arguments()
+            .find(|arg| arg.get_id() == "url")
+            .expect("open-url URL argument");
+        assert!(url.is_required_set());
     }
 
     #[test]

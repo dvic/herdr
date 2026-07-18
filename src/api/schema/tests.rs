@@ -62,6 +62,39 @@ fn request_uses_dot_method_names() {
 }
 
 #[test]
+fn client_open_url_request_and_response_use_the_public_schema() {
+    let request: Request = serde_json::from_value(serde_json::json!({
+        "id": "open_1",
+        "method": "client.open_url",
+        "params": { "url": "https://example.com/path?q=1#fragment" }
+    }))
+    .unwrap();
+    let Method::ClientOpenUrl(params) = request.method else {
+        panic!("expected client.open_url request");
+    };
+    assert_eq!(params.url, "https://example.com/path?q=1#fragment");
+
+    let response = SuccessResponse {
+        id: "open_1".into(),
+        result: ResponseResult::ClientOpenUrl {
+            delivered: true,
+            reason: ClientOpenUrlReason::Forwarded,
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(response).unwrap(),
+        serde_json::json!({
+            "id": "open_1",
+            "result": {
+                "type": "client_open_url",
+                "delivered": true,
+                "reason": "forwarded"
+            }
+        })
+    );
+}
+
+#[test]
 fn agent_start_and_prompt_requests_round_trip() {
     let start = Request {
         id: "start".into(),

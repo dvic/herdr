@@ -322,7 +322,7 @@ description = "apply layout"
 ハンドラーのアクションは `HERDR_PLUGIN_CONTEXT_JSON` で
 `invocation_source = "link_click"`、`clicked_url`、`link_handler_id` を受け取ります。
 シェルプラグインは `HERDR_PLUGIN_CLICKED_URL` と `HERDR_PLUGIN_LINK_HANDLER_ID` も
-読めます。ハンドラーは各プラグイン内でマニフェストの順にチェックされます。
+読めます。ハンドラーは各プラグイン内でマニフェストの順にチェックされます。マッチしたハンドラーが優先され、どのハンドラーもリンクを処理しなかった場合は、フォアグラウンドのフルアプリクライアントのデスクトップで開きます。
 
 ## ストレージ
 
