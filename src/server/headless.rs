@@ -248,6 +248,15 @@ enum ForegroundDelivery {
     ForwardFailed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientSendOutcome {
+    Sent,
+    MissingClient,
+    MissingWriter,
+    SerializationFailed,
+    QueueClosed,
+}
+
 /// The headless server — runs the herdr event loop without a real terminal.
 pub struct HeadlessServer {
     app: app::App,
@@ -2451,56 +2460,48 @@ impl HeadlessServer {
         if !client.is_full_app_client() {
             return ForegroundDelivery::NoForegroundClient;
         }
-        let Some(writer) = client.writer.as_ref() else {
-            return ForegroundDelivery::ForwardFailed;
-        };
+
+        match self.send_to_client_outcome(client_id, msg) {
+            ClientSendOutcome::Sent => ForegroundDelivery::Forwarded,
+            ClientSendOutcome::MissingClient => ForegroundDelivery::NoForegroundClient,
+            ClientSendOutcome::MissingWriter
+            | ClientSendOutcome::SerializationFailed
+            | ClientSendOutcome::QueueClosed => ForegroundDelivery::ForwardFailed,
+        }
+    }
+
+    fn send_to_client_outcome(&mut self, client_id: u64, msg: ServerMessage) -> ClientSendOutcome {
         let serialized = match Self::frame_server_message(&msg) {
             Ok(framed) => framed,
-            Err(_error) => {
-                warn!(
-                    client_id,
-                    "failed to serialize foreground client control message"
-                );
-                return ForegroundDelivery::ForwardFailed;
+            Err(error) => {
+                warn!(client_id, err = %error, "failed to serialize message for client");
+                return ClientSendOutcome::SerializationFailed;
             }
+        };
+        let Some(client) = self.clients.get(&client_id) else {
+            return ClientSendOutcome::MissingClient;
+        };
+        let Some(writer) = client.writer.as_ref() else {
+            return ClientSendOutcome::MissingWriter;
         };
         if writer.control.send(serialized).is_err() {
             debug!(
                 client_id,
-                "foreground client control queue rejected message"
+                "client writer channel closed during targeted send"
             );
             self.remove_client_and_resize_if_needed(client_id);
-            return ForegroundDelivery::ForwardFailed;
+            return ClientSendOutcome::QueueClosed;
         }
-        ForegroundDelivery::Forwarded
+        ClientSendOutcome::Sent
     }
 
     /// Sends a message to a specific client. Returns false if the client
     /// was not found or the send failed (client removed).
     fn send_to_client(&mut self, client_id: u64, msg: ServerMessage) -> bool {
-        let serialized = match Self::frame_server_message(&msg) {
-            Ok(framed) => framed,
-            Err(err) => {
-                warn!(client_id, err = %err, "failed to serialize message for client");
-                return false;
-            }
-        };
-
-        if let Some(client) = self.clients.get(&client_id) {
-            if let Some(writer) = &client.writer {
-                if writer.control.send(serialized).is_err() {
-                    debug!(
-                        client_id,
-                        "client writer channel closed during targeted send"
-                    );
-                    self.remove_client_and_resize_if_needed(client_id);
-                    return false;
-                }
-            }
-            true
-        } else {
-            false
-        }
+        matches!(
+            self.send_to_client_outcome(client_id, msg),
+            ClientSendOutcome::Sent | ClientSendOutcome::MissingWriter
+        )
     }
 
     fn shutdown_terminal_stream_clients(&mut self, terminal_id: &str, reason: String) {

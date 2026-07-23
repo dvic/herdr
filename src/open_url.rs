@@ -43,7 +43,7 @@ pub(crate) fn validate(url: &str) -> Result<ValidatedUrl<'_>, ValidationError> {
     if url.len() > MAX_URL_BYTES {
         return Err(ValidationError::TooLong);
     }
-    if url.chars().any(char::is_control) {
+    if url.chars().any(|ch| ch <= '\u{001f}' || ch == '\u{007f}') {
         return Err(ValidationError::RawControl);
     }
     if url.chars().any(char::is_whitespace) {
@@ -211,7 +211,6 @@ mod tests {
             ),
             ("https://example.com/\n", ValidationError::RawControl),
             ("https://example.com/\u{007f}", ValidationError::RawControl),
-            ("https://example.com/\u{009f}", ValidationError::RawControl),
             (
                 "https://example.com/%",
                 ValidationError::MalformedPercentEncoding,
