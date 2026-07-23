@@ -310,7 +310,7 @@ description = "apply layout"
 指向同一插件声明的动作。链接处理器动作在 `HERDR_PLUGIN_CONTEXT_JSON`
 中收到 `invocation_source = "link_click"`、`clicked_url` 和
 `link_handler_id`;shell 插件也可以读取 `HERDR_PLUGIN_CLICKED_URL` 和
-`HERDR_PLUGIN_LINK_HANDLER_ID`。每个插件内的处理器按清单顺序检查。
+`HERDR_PLUGIN_LINK_HANDLER_ID`。每个插件内的处理器按清单顺序检查。匹配的处理器保持优先；没有处理器接收链接时，Herdr 会在前台完整应用客户端的桌面打开它。
 
 ## 存储
 

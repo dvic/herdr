@@ -353,7 +353,9 @@ name an action declared by the same plugin. Link handler actions receive
 `invocation_source = "link_click"`, `clicked_url`, and `link_handler_id` in
 `HERDR_PLUGIN_CONTEXT_JSON`; shell plugins can also read
 `HERDR_PLUGIN_CLICKED_URL` and `HERDR_PLUGIN_LINK_HANDLER_ID`. Handlers are
-checked in manifest order inside each plugin.
+checked in manifest order inside each plugin. A matching handler keeps
+precedence; when no handler accepts the link, Herdr opens it on the foreground
+full-app client's desktop.
 
 ## Storage
 

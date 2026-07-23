@@ -44,7 +44,7 @@ herdr --remote workbox
 herdr --remote ssh://you@server:2222
 ```
 
-In this mode your local Herdr is a thin client. It connects over SSH, starts or attaches to the remote Herdr server, and streams the UI back to your local terminal. Because the client runs locally, Herdr can bridge local desktop features such as image clipboard paste into the remote session by copying the image to a remote temp file and pasting that path.
+In this mode your local Herdr is a thin client. It connects over SSH, starts or attaches to the remote Herdr server, and streams the UI back to your local terminal. Because the client runs locally, Herdr can bridge local desktop features into the remote session: image clipboard paste copies the image to a remote temp file and pastes that path, while `herdr open-url` and unhandled modified-click links open in the foreground client's local browser. If no foreground full-app client is attached, URL delivery fails instead of guessing a server desktop.
 
 By default, `herdr --remote` uses your local Herdr keybindings for that attach. This keeps local muscle memory even when the remote server has different config. The local keybindings are a snapshot from attach time; detach and reattach after editing local keybindings. Use `--remote-keybindings server` when you want the remote server config instead. Local custom command keybindings are not sent, because those commands would run on the remote host.
 

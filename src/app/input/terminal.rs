@@ -723,6 +723,27 @@ mod tests {
         assert!(app.selection_highlight_clear_deadline.is_none());
     }
 
+    #[tokio::test]
+    async fn ctrl_click_url_queues_the_exact_shared_open_url_event() {
+        let line = "see https://user:secret@example.com:8443/a%20b?q=x#frag";
+        let col = line.find("example").expect("url host") as u16;
+        let (mut app, info) = app_with_screen_bytes(line.as_bytes());
+
+        app.handle_mouse(modified_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            info.inner_rect.x + col,
+            info.inner_rect.y,
+            KeyModifiers::CONTROL,
+        ));
+
+        match app.event_rx.try_recv().expect("open URL event") {
+            crate::events::AppEvent::OpenUrl { url } => {
+                assert_eq!(url, "https://user:secret@example.com:8443/a%20b?q=x#frag")
+            }
+            other => panic!("expected OpenUrl, got {other:?}"),
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn ctrl_click_url_invokes_plugin_link_handler_but_super_click_does_not() {
@@ -745,6 +766,10 @@ mod tests {
             .expect("ctrl-click should start plugin link handler");
         assert_eq!(ctrl_log.plugin_id, "example.links");
         assert_eq!(ctrl_log.action_id.as_deref(), Some("open"));
+        assert!(
+            ctrl_app.event_rx.try_recv().is_err(),
+            "matching plugin handler must keep precedence over native URL opening"
+        );
 
         let (mut super_app, super_info) = app_with_screen_bytes(line.as_bytes());
         install_test_link_handler(&mut super_app);

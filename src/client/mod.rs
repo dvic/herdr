@@ -1592,6 +1592,9 @@ async fn run_client_loop(
                         prefix_input_source.restore();
                     }
                 }
+                ServerMessage::OpenUrl { url } => {
+                    handle_server_open_url(&url);
+                }
                 ServerMessage::Welcome { .. } => {
                     debug!("received unexpected Welcome in main loop");
                 }
@@ -1612,6 +1615,14 @@ async fn run_client_loop(
     let _ = io::stdout().flush();
 
     Ok(())
+}
+
+fn handle_server_open_url(url: &str) {
+    handle_server_open_url_with(url, crate::platform::open_url);
+}
+
+fn handle_server_open_url_with(url: &str, opener: impl FnOnce(&str) -> std::io::Result<()>) {
+    let _ = crate::open_url::dispatch_locally_with(url, opener);
 }
 
 // ---------------------------------------------------------------------------
@@ -2139,6 +2150,24 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn server_open_url_message_dispatches_exactly_once_after_client_validation() {
+        let input = "https://user:pass@example.com/path?q=1#fragment";
+        let mut opened = Vec::new();
+
+        handle_server_open_url_with(input, |url| {
+            opened.push(url.to_owned());
+            Ok(())
+        });
+        assert_eq!(opened, [input]);
+
+        handle_server_open_url_with("file:///tmp/private", |url| {
+            opened.push(url.to_owned());
+            Ok(())
+        });
+        assert_eq!(opened, [input]);
+    }
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

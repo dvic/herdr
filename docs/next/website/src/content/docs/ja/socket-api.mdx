@@ -94,7 +94,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | --- | --- |
 | サーバー | `ping`、`server.stop`、`server.reload_config`、`server.agent_manifests`、`server.reload_agent_manifests` |
 | 通知 | `notification.show` |
-| クライアント | `client.window_title.set`、`client.window_title.clear` |
+| クライアント | `client.window_title.set`、`client.window_title.clear`、`client.open_url` |
 | セッション | `session.snapshot` |
 | ワークスペース | `workspace.create`、`workspace.list`、`workspace.get`、`workspace.focus`、`workspace.rename`、`workspace.move`、`workspace.report_metadata`、`workspace.close` |
 | Worktree | `worktree.list`、`worktree.create`、`worktree.open`、`worktree.remove` |
@@ -272,6 +272,14 @@ reason の候補は `shown`、`disabled`、`rate_limited`、`no_foreground_clien
 ```
 
 `client.window_title.clear` は Herdr のデフォルトタイトルを復元します。レスポンスは `type: "client_window_title"` で、`changed` と、`set`、`cleared`、`no_foreground_client` のいずれかの reason を含みます。
+
+フォアグラウンドのフルアプリクライアントで絶対 HTTP(S) URL を開きます:
+
+```json
+{"id":"req_url","method":"client.open_url","params":{"url":"https://example.com/docs?q=1#install"}}
+```
+
+レスポンスは `type: "client_open_url"` で、`delivered` と `forwarded`、`dispatched_locally`、`no_foreground_client`、`forward_failed`、`local_dispatch_failed` のいずれかの reason を含みます。observer と controller 接続は配信対象になりません。
 
 Worktree メソッドは Git チェックアウトを Herdr ワークスペースとして管理します。`worktree.create` はチェックアウトを作成し、新しい `workspace`、`tab`、`root_pane`、`worktree` のレコードを返します。要求されたブランチがローカルに既存ならそれをチェックアウトし、なければ要求されたベースまたは `HEAD` からブランチを作成します。`worktree.open` は既存のチェックアウトを開くか、すでに開いているワークスペースを返します。`worktree.remove` はリンクされた子ワークスペースに対して `git worktree remove` を実行し、ブランチは決して削除しません。
 

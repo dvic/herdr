@@ -36,6 +36,7 @@ pub(super) fn command() -> Command {
         .subcommand(worktree_command())
         .subcommand(tab_command())
         .subcommand(notification_command())
+        .subcommand(open_url_command())
         .subcommand(agent_command())
         .subcommand(pane_command())
         .subcommand(terminal_command())
@@ -310,6 +311,12 @@ fn notification_command() -> Command {
                 ]))
                 .arg(option("sound", "SOUND").value_parser(["none", "done", "request"])),
         )
+}
+
+fn open_url_command() -> Command {
+    Command::new("open-url")
+        .about("Open an HTTP(S) URL in the foreground client's browser")
+        .arg(required("url", "URL"))
 }
 
 fn agent_command() -> Command {

@@ -147,8 +147,23 @@ fn handle_connection(
         debug!(err = %err, "api connection write timeout unavailable");
     }
 
-    let Some(line) = read_initial_request_line(&mut stream)? else {
-        return Ok(());
+    let line = match read_initial_request_line(&mut stream) {
+        Ok(Some(line)) => line,
+        Ok(None) => return Ok(()),
+        Err(err) if is_invalid_utf8_error(&err) => {
+            write_json_line_allow_disconnect(
+                &mut stream,
+                &ErrorResponse {
+                    id: String::new(),
+                    error: ErrorBody {
+                        code: "invalid_params".into(),
+                        message: "request must be valid UTF-8".into(),
+                    },
+                },
+            )?;
+            return Ok(());
+        }
+        Err(err) => return Err(err),
     };
 
     let line = line.trim();
@@ -352,6 +367,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::NotificationShow(_) => "notification.show",
         Method::ClientWindowTitleSet(_) => "client.window_title.set",
         Method::ClientWindowTitleClear(_) => "client.window_title.clear",
+        Method::ClientOpenUrl(_) => "client.open_url",
         Method::SessionSnapshot(_) => "session.snapshot",
         Method::WorkspaceCreate(_) => "workspace.create",
         Method::WorkspaceList(_) => "workspace.list",
@@ -457,6 +473,14 @@ fn api_response_outcome(response: &str) -> &'static str {
 
 fn read_initial_request_line(stream: &mut LocalStream) -> std::io::Result<Option<String>> {
     read_initial_request_line_with_timeout(stream, INITIAL_REQUEST_TIMEOUT)
+}
+
+fn is_invalid_utf8_error(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::InvalidData
+        && err
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<std::string::FromUtf8Error>())
+            .is_some()
 }
 
 fn read_initial_request_line_with_timeout(
@@ -850,6 +874,27 @@ mod tests {
         let client = crate::ipc::connect_local_stream(&path).unwrap();
         let server = listener.accept().unwrap();
         (client, server, path)
+    }
+
+    #[test]
+    fn invalid_utf8_receives_a_structured_invalid_params_response() {
+        let (mut client, server, _path) = local_stream_pair("invalid-utf8-response");
+        client.write_all(&[0xff, b'\n']).unwrap();
+        client.flush().unwrap();
+
+        let (api_tx, _api_rx) = mpsc::unbounded_channel();
+        handle_connection(
+            server,
+            &api_tx,
+            &EventHub::default(),
+            &Arc::new(AtomicBool::new(true)),
+            None,
+        )
+        .unwrap();
+
+        let response: ErrorResponse = serde_json::from_str(&read_line(&mut client)).unwrap();
+        assert_eq!(response.error.code, "invalid_params");
+        assert!(!response.error.message.contains('\u{fffd}'));
     }
 
     fn pane_info(

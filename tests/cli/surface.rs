@@ -455,6 +455,77 @@ fn root_help_advertises_api_schema_command_group() {
 }
 
 #[test]
+fn root_help_advertises_open_url() {
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .arg("--help")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("herdr open-url <URL>"));
+}
+
+#[test]
+fn open_url_cli_preserves_the_exact_url_over_the_socket() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("herdr.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let url = "HTTPS://user:secret@bücher.example:8443/a%20b?q=x#frag";
+
+    let server = thread::spawn({
+        let socket_path = socket_path.clone();
+        move || {
+            let (mut stream, line) = accept_fake_cli_operation(&listener);
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], "client.open_url");
+            assert_eq!(request["params"]["url"], url);
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "id": "cli:open-url",
+                    "result": {
+                        "type": "client_open_url",
+                        "delivered": true,
+                        "reason": "forwarded"
+                    }
+                })
+            )
+            .unwrap();
+            stream.flush().unwrap();
+            let _ = fs::remove_file(socket_path);
+        }
+    });
+
+    let output = run_cli(&socket_path, &["open-url", url]);
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["result"]["reason"], "forwarded");
+    server.join().unwrap();
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn open_url_cli_rejects_invalid_input_before_socket_access() {
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["open-url", "https://user:secret@example.com/raw space"])
+        .env("HERDR_SOCKET_PATH", "/tmp/herdr-open-url-missing.sock")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["error"]["code"], "invalid_params");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("user:secret"));
+}
+
+#[test]
 fn api_schema_default_output_is_a_short_summary() {
     let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
         .args(["api", "schema"])
