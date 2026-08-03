@@ -567,15 +567,6 @@ impl App {
         source_id: super::InputSourceId,
         mouse: MouseEvent,
     ) -> bool {
-        self.handle_modified_url_click_with(source_id, mouse, crate::platform::open_url)
-    }
-
-    fn handle_modified_url_click_with(
-        &mut self,
-        source_id: super::InputSourceId,
-        mouse: MouseEvent,
-        open_url: impl FnOnce(&str) -> std::io::Result<Option<std::process::Child>>,
-    ) -> bool {
         if self.state.mode != Mode::Terminal
             || !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             || !mouse.modifiers.contains(modified_url_click_modifier())
@@ -601,15 +592,15 @@ impl App {
             Ok(true) => return true,
             Ok(false) => {}
             Err(err) => {
-                tracing::warn!(err = %err, url = %url, "failed to invoke plugin link handler");
+                crate::open_url::log_plugin_handler_failure(&url, &err);
             }
         }
-        match open_url(&url) {
-            Ok(Some(child)) => self.detached_process_children.push(child),
-            Ok(None) => {}
-            Err(err) => {
-                tracing::warn!(err = %err, url = %url, "failed to open pane URL");
-            }
+        if self
+            .event_tx
+            .try_send(crate::events::AppEvent::OpenUrl { url })
+            .is_err()
+        {
+            tracing::warn!("failed to queue web URL open event");
         }
         true
     }

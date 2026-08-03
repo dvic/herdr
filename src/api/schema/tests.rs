@@ -62,6 +62,34 @@ fn request_uses_dot_method_names() {
 }
 
 #[test]
+fn client_open_url_request_and_response_preserve_the_exact_url_and_reason() {
+    let url = "HTTPS://user:secret@bücher.example:8443/a%20b?q=x#frag";
+    let request = Request {
+        id: "open_url".into(),
+        method: Method::ClientOpenUrl(ClientOpenUrlParams { url: url.into() }),
+    };
+
+    let request_json = serde_json::to_value(&request).unwrap();
+    assert_eq!(request_json["method"], "client.open_url");
+    assert_eq!(request_json["params"]["url"], url);
+    assert_eq!(
+        serde_json::from_value::<Request>(request_json).unwrap(),
+        request
+    );
+
+    let response = SuccessResponse {
+        id: "open_url".into(),
+        result: ResponseResult::ClientOpenUrl {
+            delivered: true,
+            reason: ClientOpenUrlReason::Forwarded,
+        },
+    };
+    let response_json = serde_json::to_value(response).unwrap();
+    assert_eq!(response_json["result"]["type"], "client_open_url");
+    assert_eq!(response_json["result"]["reason"], "forwarded");
+}
+
+#[test]
 fn agent_start_and_prompt_requests_round_trip() {
     let start = Request {
         id: "start".into(),

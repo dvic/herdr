@@ -37,6 +37,11 @@ pub(super) fn command() -> Command {
         .subcommand(worktree_command())
         .subcommand(tab_command())
         .subcommand(notification_command())
+        .subcommand(
+            Command::new("open-url")
+                .about("Open a URL on the foreground client")
+                .arg(required("url", "URL")),
+        )
         .subcommand(agent_command())
         .subcommand(pane_command())
         .subcommand(terminal_command())

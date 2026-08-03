@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+- Added `herdr open-url` and `client.open_url` to open HTTP(S) URLs on the foreground full-app client, including across remote sessions.
+
+### Changed
+- The client/server protocol is now version 21 for foreground-client URL delivery.
+
 ## [0.8.2] - 2026-08-19
 
 ### Added

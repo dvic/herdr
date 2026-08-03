@@ -74,6 +74,7 @@ mod layout;
 mod logging;
 mod metadata_tokens;
 mod noninteractive_process;
+mod open_url;
 mod pane;
 mod pane_graphics_files;
 mod persist;
@@ -634,6 +635,7 @@ fn main() -> io::Result<()> {
         println!("       herdr worktree <subcommand> ...");
         println!("       herdr tab <subcommand> ...");
         println!("       herdr notification <subcommand> ...");
+        println!("       herdr open-url <URL>");
         println!("       herdr agent <subcommand> ...");
         println!("       herdr pane <subcommand> ...");
         println!("       herdr session <subcommand> ...");
@@ -684,6 +686,10 @@ fn main() -> io::Result<()> {
             (
                 "herdr notification <subcommand>",
                 "Notification helpers over the socket API",
+            ),
+            (
+                "herdr open-url <URL>",
+                "Open a URL in the foreground client's browser",
             ),
             (
                 "herdr agent <subcommand>",

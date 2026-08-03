@@ -98,6 +98,8 @@ struct ClientState {
     repaint_pending: bool,
     /// Whether this client draws the cursor into frame cells instead of using the host cursor.
     draw_host_cursor: bool,
+    /// URL opener processes that the client must reap after they exit.
+    detached_process_children: Vec<std::process::Child>,
 }
 
 #[derive(Debug, Default)]
@@ -1410,6 +1412,7 @@ async fn run_client_loop(
         redraw_on_focus_gained: config.redraw_on_focus_gained,
         repaint_pending: false,
         draw_host_cursor,
+        detached_process_children: Vec::new(),
     };
     debug!(?negotiated_encoding, "client render encoding active");
     let host_mouse_capture_active = Arc::new(AtomicBool::new(state.mouse_capture_active));
@@ -1879,6 +1882,11 @@ async fn run_client_loop(
                         prefix_input_source.restore();
                     }
                 }
+                ServerMessage::OpenUrl { url } => {
+                    if let Some(child) = handle_server_open_url(&url) {
+                        state.detached_process_children.push(child);
+                    }
+                }
                 ServerMessage::Welcome { .. } => {
                     debug!("received unexpected Welcome in main loop");
                 }
@@ -1890,6 +1898,7 @@ async fn run_client_loop(
                 )));
             }
             ClientLoopEvent::Timer => {
+                reap_finished_open_url_processes(&mut state.detached_process_children);
                 #[cfg(unix)]
                 if let Ok(mut matcher) = state.direct_graphics_response.lock() {
                     matcher.expire();
@@ -1904,6 +1913,31 @@ async fn run_client_loop(
     let _ = io::stdout().flush();
 
     Ok(())
+}
+
+fn handle_server_open_url(url: &str) -> Option<std::process::Child> {
+    handle_server_open_url_with(url, crate::platform::open_url)
+}
+
+fn handle_server_open_url_with(
+    url: &str,
+    opener: impl FnOnce(&str) -> std::io::Result<Option<std::process::Child>>,
+) -> Option<std::process::Child> {
+    crate::open_url::dispatch_locally_with(url, opener)
+        .ok()
+        .flatten()
+}
+
+fn reap_finished_open_url_processes(children: &mut Vec<std::process::Child>) {
+    children.retain_mut(|child| match child.try_wait() {
+        Ok(None) => true,
+        Ok(Some(_)) => false,
+        Err(err) if err.kind() == io::ErrorKind::Interrupted => true,
+        Err(err) => {
+            warn!(pid = child.id(), err = %err, "failed to reap URL opener process");
+            false
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -2634,6 +2668,26 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn server_open_url_message_dispatches_once_after_client_validation() {
+        let input = "https://user:pass@example.com/path?q=1#fragment";
+        let mut opened = Vec::new();
+
+        let child = handle_server_open_url_with(input, |url| {
+            opened.push(url.to_owned());
+            Ok(None)
+        });
+        assert!(child.is_none());
+        assert_eq!(opened, [input]);
+
+        let child = handle_server_open_url_with("file:///tmp/private", |url| {
+            opened.push(url.to_owned());
+            Ok(None)
+        });
+        assert!(child.is_none());
+        assert_eq!(opened, [input]);
+    }
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

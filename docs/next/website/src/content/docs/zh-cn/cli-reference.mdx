@@ -93,9 +93,12 @@ herdr server reload-agent-manifests
 
 ```bash
 herdr notification show <title> [--body TEXT] [--position top-left|top-right|bottom-left|bottom-right] [--sound none|done|request]
+herdr open-url <URL>
 ```
 
 `notification show` 使用配置的 `[ui.toast]` 投递方式。`--position` 只影响 Herdr 应用内的 toast。`--sound` 默认为 `none`;`done` 和 `request` 只在通知实际显示时播放已有的完成音和需要关注音。
+
+`open-url` 接受一个绝对 HTTP(S) URL，并在前台完整应用客户端中打开。它把结构化的 `client_open_url` 响应写到 stdout；没有合格的前台客户端或投递失败时以非零状态退出。在 `--no-session` 模式下，同一命令会在本地打开 URL。
 
 ## 会话
 

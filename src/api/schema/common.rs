@@ -51,6 +51,11 @@ pub struct ClientWindowTitleSetParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ClientOpenUrlParams {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SplitDirection {
     Right,
@@ -135,6 +140,16 @@ pub enum ClientWindowTitleReason {
     Set,
     Cleared,
     NoForegroundClient,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientOpenUrlReason {
+    Forwarded,
+    DispatchedLocally,
+    NoForegroundClient,
+    ForwardFailed,
+    LocalDispatchFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

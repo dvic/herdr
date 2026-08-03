@@ -113,6 +113,14 @@ impl App {
         &mut self,
         ev: AppEvent,
     ) -> Vec<crate::app::actions::PaneStateUpdate> {
+        self.handle_internal_event_with_open_url_opener(ev, crate::platform::open_url)
+    }
+
+    fn handle_internal_event_with_open_url_opener(
+        &mut self,
+        ev: AppEvent,
+        opener: impl FnOnce(&str) -> std::io::Result<Option<std::process::Child>>,
+    ) -> Vec<crate::app::actions::PaneStateUpdate> {
         if let AppEvent::TerminalBell { count, .. } = ev {
             if let Err(err) =
                 crate::terminal_effects::write_terminal_bells(&mut std::io::stdout(), count)
@@ -121,13 +129,19 @@ impl App {
             }
             return Vec::new();
         }
-
         if let AppEvent::ClipboardWrite { content } = ev {
             #[cfg(not(test))]
             crate::selection::write_osc52_bytes(&content);
             #[cfg(test)]
             let _ = content;
             self.show_clipboard_feedback();
+            return Vec::new();
+        }
+
+        if let AppEvent::OpenUrl { url } = ev {
+            if let Ok(Some(child)) = crate::open_url::dispatch_locally_with(&url, opener) {
+                self.detached_process_children.push(child);
+            }
             return Vec::new();
         }
 
@@ -1000,6 +1014,17 @@ impl App {
             Method::NotificationShow(params) => {
                 return self.handle_notification_show(request.id, params);
             }
+            Method::ClientOpenUrl(params) => {
+                let (response, child) = client_open_url_response_with(
+                    request.id,
+                    &params.url,
+                    crate::open_url::dispatch_locally,
+                );
+                if let Some(child) = child {
+                    self.detached_process_children.push(child);
+                }
+                return response;
+            }
             Method::ClientWindowTitleSet(_) | Method::ClientWindowTitleClear(_) => {
                 return responses::encode_success(
                     request.id,
@@ -1304,6 +1329,51 @@ impl App {
     }
 }
 
+fn client_open_url_response_with(
+    id: String,
+    url: &str,
+    dispatch: impl FnOnce(
+        &str,
+    )
+        -> Result<Option<std::process::Child>, crate::open_url::LocalDispatchError>,
+) -> (String, Option<std::process::Child>) {
+    use crate::api::schema::{ClientOpenUrlReason, ResponseResult};
+
+    match dispatch(url) {
+        Ok(child) => (
+            responses::encode_success(
+                id,
+                ResponseResult::ClientOpenUrl {
+                    delivered: true,
+                    reason: ClientOpenUrlReason::DispatchedLocally,
+                },
+            ),
+            child,
+        ),
+        Err(crate::open_url::LocalDispatchError::Invalid) => (
+            responses::encode_error(
+                id,
+                "invalid_params",
+                "url must be an absolute HTTP(S) URL with a host and valid encoding",
+            ),
+            None,
+        ),
+        Err(crate::open_url::LocalDispatchError::Open(error)) => {
+            let _ = error;
+            (
+                responses::encode_success(
+                    id,
+                    ResponseResult::ClientOpenUrl {
+                        delivered: false,
+                        reason: ClientOpenUrlReason::LocalDispatchFailed,
+                    },
+                ),
+                None,
+            )
+        }
+    }
+}
+
 fn sanitized_notification_text(value: &str, max_chars: usize) -> Option<String> {
     let mut sanitized = String::new();
     let mut previous_space = false;
@@ -1379,7 +1449,82 @@ pub(super) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::schema::{ClientOpenUrlReason, ErrorResponse, ResponseResult, SuccessResponse};
     use crate::detect::{Agent, AgentState};
+
+    #[test]
+    fn monolithic_client_open_url_reports_each_dispatch_result() {
+        let input = "https://user:pass@example.com/path?q=1#fragment";
+        let (success, child) = client_open_url_response_with("success".into(), input, |url| {
+            assert_eq!(url, input);
+            Ok(None)
+        });
+        let success: SuccessResponse = serde_json::from_str(&success).unwrap();
+        assert!(child.is_none());
+        assert_eq!(
+            success.result,
+            ResponseResult::ClientOpenUrl {
+                delivered: true,
+                reason: ClientOpenUrlReason::DispatchedLocally,
+            }
+        );
+
+        let (failed, child) = client_open_url_response_with("failed".into(), input, |_| {
+            Err(crate::open_url::LocalDispatchError::Open(
+                std::io::Error::other("test opener failure"),
+            ))
+        });
+        let failed: SuccessResponse = serde_json::from_str(&failed).unwrap();
+        assert!(child.is_none());
+        assert_eq!(
+            failed.result,
+            ResponseResult::ClientOpenUrl {
+                delivered: false,
+                reason: ClientOpenUrlReason::LocalDispatchFailed,
+            }
+        );
+
+        let (invalid, child) = client_open_url_response_with("invalid".into(), input, |_| {
+            Err(crate::open_url::LocalDispatchError::Invalid)
+        });
+        let invalid: ErrorResponse = serde_json::from_str(&invalid).unwrap();
+        assert!(child.is_none());
+        assert_eq!(invalid.error.code, "invalid_params");
+    }
+
+    #[test]
+    fn monolithic_open_url_event_dispatches_exactly_once_after_validation() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let input = "https://user:pass@example.com/path?q=1#fragment";
+        let mut opened = Vec::new();
+
+        app.handle_internal_event_with_open_url_opener(
+            AppEvent::OpenUrl { url: input.into() },
+            |url| {
+                opened.push(url.to_owned());
+                Ok(None)
+            },
+        );
+        assert_eq!(opened, [input]);
+
+        app.handle_internal_event_with_open_url_opener(
+            AppEvent::OpenUrl {
+                url: "file:///tmp/private".into(),
+            },
+            |url| {
+                opened.push(url.to_owned());
+                Ok(None)
+            },
+        );
+        assert_eq!(opened, [input]);
+    }
 
     #[cfg(unix)]
     fn init_repo(path: &std::path::Path) {

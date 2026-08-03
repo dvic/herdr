@@ -405,7 +405,6 @@ mod tests {
     use ratatui::layout::Rect;
 
     #[cfg(target_os = "linux")]
-    use super::super::wait_for_detached_process_reap;
     use super::super::{app_for_mouse_test, mouse, numbered_lines_bytes};
     #[cfg(unix)]
     use super::super::{unique_temp_path, wait_for_file};
@@ -880,63 +879,25 @@ mod tests {
         assert!(app.selection_highlight_clear_deadline.is_none());
     }
 
-    #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn ctrl_click_url_reaps_failed_opener() {
-        let opener_dir = unique_temp_path("url-opener");
-        let record_path = opener_dir.join("record");
-        let opener_path = opener_dir.join("xdg-open");
-        std::fs::create_dir_all(&opener_dir).expect("fake opener directory");
-        std::fs::write(
-            &opener_path,
-            "#!/bin/sh\nprintf '%s\\n%s\\n' \"$$\" \"$1\" > \"$2\"\nexit 3\n",
-        )
-        .expect("fake opener script");
-
-        let url = "https://example.com/akbash-2903";
-        let line = format!("see {url}");
+    async fn ctrl_click_url_queues_the_exact_shared_open_url_event() {
+        let line = "see https://user:secret@example.com:8443/a%20b?q=x#frag";
+        let col = line.find("example").expect("url host") as u16;
         let (mut app, info) = app_with_screen_bytes(line.as_bytes());
-        let col = info.inner_rect.x + line.find("example").expect("url host") as u16;
-        let handled = app.handle_modified_url_click_with(
-            41,
-            modified_mouse(
-                MouseEventKind::Down(MouseButton::Left),
-                col,
-                info.inner_rect.y,
-                KeyModifiers::CONTROL,
-            ),
-            |clicked_url| {
-                std::process::Command::new("/bin/sh")
-                    .arg(&opener_path)
-                    .arg(clicked_url)
-                    .arg(&record_path)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                    .map(Some)
-            },
-        );
-        assert!(handled);
 
-        let record = wait_for_file(&record_path);
-        let mut lines = record.lines();
-        let pid = lines
-            .next()
-            .expect("opener pid")
-            .parse::<u32>()
-            .expect("numeric opener pid");
-        assert_eq!(lines.next(), Some(url));
+        app.handle_mouse(modified_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            info.inner_rect.x + col,
+            info.inner_rect.y,
+            KeyModifiers::CONTROL,
+        ));
 
-        let reaped = wait_for_detached_process_reap(&mut app, pid).await;
-        if !reaped {
-            unsafe {
-                libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), 0);
+        match app.event_rx.try_recv().expect("open URL event") {
+            crate::events::AppEvent::OpenUrl { url } => {
+                assert_eq!(url, "https://user:secret@example.com:8443/a%20b?q=x#frag")
             }
+            other => panic!("expected OpenUrl, got {other:?}"),
         }
-
-        let _ = std::fs::remove_dir_all(&opener_dir);
-        assert!(reaped, "failed URL opener child {pid} was not reaped");
     }
 
     #[cfg(unix)]
@@ -1064,6 +1025,10 @@ mod tests {
             .expect("ctrl-click should start plugin link handler");
         assert_eq!(ctrl_log.plugin_id, "example.links");
         assert_eq!(ctrl_log.action_id.as_deref(), Some("open"));
+        assert!(
+            ctrl_app.event_rx.try_recv().is_err(),
+            "matching plugin handler must keep precedence over native URL opening"
+        );
 
         let (mut super_app, super_info) = app_with_screen_bytes(line.as_bytes());
         install_test_link_handler(&mut super_app);

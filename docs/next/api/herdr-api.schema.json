@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 20,
+  "protocol": 21,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -1686,6 +1686,17 @@
           },
           "required": [
             "target"
+          ],
+          "type": "object"
+        },
+        "ClientOpenUrlParams": {
+          "properties": {
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "url"
           ],
           "type": "object"
         },
@@ -4574,6 +4585,22 @@
         {
           "properties": {
             "method": {
+              "const": "client.open_url",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ClientOpenUrlParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "session.snapshot",
               "type": "string"
             },
@@ -6334,6 +6361,16 @@
             "blocked",
             "done",
             "unknown"
+          ],
+          "type": "string"
+        },
+        "ClientOpenUrlReason": {
+          "enum": [
+            "forwarded",
+            "dispatched_locally",
+            "no_foreground_client",
+            "forward_failed",
+            "local_dispatch_failed"
           ],
           "type": "string"
         },
@@ -9466,6 +9503,26 @@
               "required": [
                 "type",
                 "changed",
+                "reason"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "delivered": {
+                  "type": "boolean"
+                },
+                "reason": {
+                  "$ref": "#/schemas/success_response/$defs/ClientOpenUrlReason"
+                },
+                "type": {
+                  "const": "client_open_url",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "delivered",
                 "reason"
               ],
               "type": "object"
