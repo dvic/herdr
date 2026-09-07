@@ -360,6 +360,24 @@ fn next_window_title(control_rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> Option<
     None
 }
 
+fn next_open_url(control_rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> Option<String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        let Ok(bytes) = control_rx.recv_timeout(remaining) else {
+            return None;
+        };
+        let ServerMessage::EndpointControl { kind, data } = read_server_message(bytes) else {
+            continue;
+        };
+        if kind == crate::protocol::endpoint::OPEN_URL_KIND {
+            let payload: crate::protocol::endpoint::OpenUrlControl =
+                serde_json::from_str(&data).unwrap();
+            return Some(payload.url);
+        }
+    }
+    None
+}
+
 fn drain_window_titles(control_rx: &std::sync::mpsc::Receiver<Vec<u8>>) {
     while control_rx.recv_timeout(Duration::from_millis(50)).is_ok() {}
 }
@@ -583,6 +601,43 @@ fn clearing_the_api_title_falls_back_to_herdr_when_window_titles_are_disabled() 
     server.handle_client_window_title_api("clear".into(), None);
     assert_eq!(next_window_title(&control_rx), Some(None));
 
+    shutdown_test_runtimes(&mut server);
+}
+
+#[test]
+fn client_open_url_api_forwards_to_the_foreground_client() {
+    let (mut server, control_rx) = window_title_test_server();
+    let input = "https://example.com/path?q=1#fragment";
+
+    let response = server.handle_client_open_url_api("open".into(), input);
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+    assert_eq!(response["result"]["type"], "client_open_url");
+    assert_eq!(response["result"]["delivered"], true);
+    assert_eq!(response["result"]["reason"], "forwarded");
+    assert_eq!(next_open_url(&control_rx).as_deref(), Some(input));
+    shutdown_test_runtimes(&mut server);
+}
+
+#[test]
+fn client_open_url_api_reports_missing_foreground_client() {
+    let mut server = test_headless_server();
+    let response = server.handle_client_open_url_api("open".into(), "https://example.com");
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+    assert_eq!(response["result"]["delivered"], false);
+    assert_eq!(response["result"]["reason"], "no_foreground_client");
+    shutdown_test_runtimes(&mut server);
+}
+
+#[test]
+fn client_open_url_api_rejects_invalid_urls_before_forwarding() {
+    let (mut server, control_rx) = window_title_test_server();
+    let response = server.handle_client_open_url_api("open".into(), "file:///tmp/private");
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+    assert_eq!(response["error"]["code"], "invalid_params");
+    assert!(next_open_url(&control_rx).is_none());
     shutdown_test_runtimes(&mut server);
 }
 

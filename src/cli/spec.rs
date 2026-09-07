@@ -44,6 +44,7 @@ pub(super) fn command() -> Command {
         .subcommand(agent_command())
         .subcommand(pane_command())
         .subcommand(terminal_command())
+        .subcommand(open_url_command())
         .subcommand(session_command())
         .subcommand(integration_command())
         .subcommand(plugin_command());
@@ -312,6 +313,12 @@ fn notification_command() -> Command {
                 ]))
                 .arg(option("sound", "SOUND").value_parser(["none", "done", "request"])),
         )
+}
+
+fn open_url_command() -> Command {
+    Command::new("open-url")
+        .about("Open a web URL on the foreground client")
+        .arg(required("url", "URL").value_hint(ValueHint::Url))
 }
 
 fn agent_command() -> Command {

@@ -13,6 +13,10 @@ pub(crate) fn is_presentation_effect(message: &ServerMessage) -> bool {
             | ServerMessage::GraphicsFile { .. }
             | ServerMessage::GraphicsTransmissionRetired { .. }
             | ServerMessage::TerminalBell { .. }
+    ) || matches!(
+        message,
+        ServerMessage::EndpointControl { kind, .. }
+            if kind == crate::protocol::endpoint::OPEN_URL_KIND
     )
 }
 
@@ -22,6 +26,9 @@ pub(crate) fn accepts_endpoint_message(
     command_response: bool,
     message: &ServerMessage,
 ) -> bool {
+    if is_presentation_effect(message) {
+        return endpoint_active;
+    }
     endpoint_active
         || matches!(
             message,
@@ -75,6 +82,12 @@ mod tests {
                 title: Some("remote".into())
             }
         ));
+        assert!(!accepts_endpoint_message(
+            false,
+            false,
+            false,
+            &crate::protocol::endpoint::open_url_message("https://example.com").unwrap()
+        ));
     }
 
     #[test]
@@ -92,6 +105,9 @@ mod tests {
             control: "a=t".into(),
             surface_asset: None,
         }));
+        assert!(is_presentation_effect(
+            &crate::protocol::endpoint::open_url_message("https://example.com").unwrap()
+        ));
         assert!(!is_presentation_effect(&ServerMessage::EndpointControl {
             kind: "shell.snapshot.v1".into(),
             data: "{}".into(),

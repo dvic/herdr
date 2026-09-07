@@ -28,6 +28,7 @@ mod completion;
 mod integration;
 mod machine;
 mod notification;
+mod open_url;
 mod pane;
 mod plugin;
 mod protocol_guard;
@@ -126,6 +127,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "notification" => notification::run_notification_command(&args[2..])?,
         "agent" => agent::run_agent_command(&args[2..])?,
         "terminal" => run_terminal_command(&args[2..])?,
+        "open-url" => open_url::run_open_url_command(&args[2..])?,
         "pane" => pane::run_pane_command(&args[2..])?,
         "plugin" => plugin::run_plugin_command(&args[2..])?,
         "integration" => integration::run_integration_command(&args[2..])?,

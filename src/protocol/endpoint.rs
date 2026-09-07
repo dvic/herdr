@@ -31,6 +31,7 @@ pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
 pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
 pub const AGENT_COMPLETIONS_CAPABILITY: &str = "agent_completions";
 pub const AGENT_COMPLETIONS_KIND: &str = "endpoint.agent-completions.v1";
+pub const OPEN_URL_KIND: &str = "host.open_url.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointAgentCompletions {
@@ -104,6 +105,18 @@ pub struct EndpointServerWelcome {
     pub capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<EndpointHandshakeError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenUrlControl {
+    pub url: String,
+}
+
+pub fn open_url_message(url: &str) -> serde_json::Result<ServerMessage> {
+    Ok(ServerMessage::EndpointControl {
+        kind: OPEN_URL_KIND.into(),
+        data: serde_json::to_string(&OpenUrlControl { url: url.into() })?,
+    })
 }
 
 pub fn snapshot_message(snapshot: &ClientShellSnapshot) -> serde_json::Result<ServerMessage> {
@@ -331,6 +344,18 @@ mod tests {
                 .unwrap(),
             Some(view)
         );
+    }
+
+    #[test]
+    fn open_url_uses_an_optional_named_control() {
+        let ServerMessage::EndpointControl { kind, data } =
+            open_url_message("https://example.com/path?q=1").unwrap()
+        else {
+            panic!("open URL should use endpoint control");
+        };
+        assert_eq!(kind, OPEN_URL_KIND);
+        let decoded: OpenUrlControl = serde_json::from_str(&data).unwrap();
+        assert_eq!(decoded.url, "https://example.com/path?q=1");
     }
 
     #[test]

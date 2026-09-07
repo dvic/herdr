@@ -373,6 +373,21 @@ fn client_window_title_requests_round_trip() {
 }
 
 #[test]
+fn client_open_url_request_round_trips() {
+    let request = Request {
+        id: "req_open_url".into(),
+        method: Method::ClientOpenUrl(ClientOpenUrlParams {
+            url: "https://example.com/path?q=1".into(),
+        }),
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "client.open_url");
+    assert_eq!(json["params"]["url"], "https://example.com/path?q=1");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
 fn agent_view_requests_round_trip() {
     let set_json = serde_json::json!({
         "id": "view-set",

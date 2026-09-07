@@ -1,5 +1,34 @@
 use super::*;
 
+pub(super) fn dispatch_open_url_control(
+    data: &str,
+    detached_process_children: &mut Vec<std::process::Child>,
+) {
+    dispatch_open_url_control_with(data, detached_process_children, crate::platform::open_url);
+}
+
+fn dispatch_open_url_control_with(
+    data: &str,
+    detached_process_children: &mut Vec<std::process::Child>,
+    opener: impl FnOnce(&str) -> std::io::Result<Option<std::process::Child>>,
+) {
+    let payload = match serde_json::from_str::<crate::protocol::endpoint::OpenUrlControl>(data) {
+        Ok(payload) => payload,
+        Err(error) => {
+            warn!(%error, "ignored malformed host.open_url endpoint control");
+            return;
+        }
+    };
+    match crate::open_url::dispatch_locally_with(&payload.url, opener) {
+        Ok(Some(child)) => detached_process_children.push(child),
+        Ok(None) => {}
+        Err(crate::open_url::LocalDispatchError::Invalid) => {}
+        Err(crate::open_url::LocalDispatchError::Open(error)) => {
+            warn!(error_kind = ?error.kind(), "host.open_url endpoint control failed");
+        }
+    }
+}
+
 pub(super) fn dispatch_client_shell_actions(
     actions: Vec<shell::ClientShellAction>,
     endpoint_commands: &mut endpoint_commands::EndpointCommands,
@@ -899,5 +928,34 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn open_url_control_dispatches_the_exact_validated_url() {
+        let input = "https://example.com/path?q=1#fragment";
+        let data =
+            serde_json::to_string(&crate::protocol::endpoint::OpenUrlControl { url: input.into() })
+                .unwrap();
+        let mut children = Vec::new();
+        let mut opened = Vec::new();
+
+        dispatch_open_url_control_with(&data, &mut children, |url| {
+            opened.push(url.to_owned());
+            Ok(None)
+        });
+
+        assert_eq!(opened, [input]);
+        assert!(children.is_empty());
+    }
+
+    #[test]
+    fn invalid_open_url_control_never_reaches_the_platform_opener() {
+        let data = serde_json::to_string(&crate::protocol::endpoint::OpenUrlControl {
+            url: "file:///tmp/private".into(),
+        })
+        .unwrap();
+        dispatch_open_url_control_with(&data, &mut Vec::new(), |_| {
+            panic!("invalid URL must not reach the platform opener")
+        });
     }
 }

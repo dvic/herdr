@@ -33,6 +33,7 @@ mod layout;
 mod logging;
 mod metadata_tokens;
 mod noninteractive_process;
+mod open_url;
 mod pane;
 use ghostty_vt::pane_graphics_files;
 mod persist;
