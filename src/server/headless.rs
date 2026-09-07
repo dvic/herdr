@@ -1594,6 +1594,52 @@ impl HeadlessServer {
         .unwrap_or_else(|_| "{}".to_string())
     }
 
+    fn handle_client_open_url_api(&mut self, id: String, url: &str) -> String {
+        use api::schema::{ClientOpenUrlReason, ResponseResult};
+
+        let url = match crate::open_url::validate(url) {
+            Ok(url) => url,
+            Err(error) => {
+                crate::open_url::log_validation_failure("server_api", url, error);
+                return serde_json::to_string(&api::schema::ErrorResponse {
+                    id,
+                    error: api::schema::ErrorBody {
+                        code: "invalid_params".into(),
+                        message: format!("invalid URL ({})", error.class()),
+                    },
+                })
+                .unwrap_or_else(|_| "{}".to_string());
+            }
+        };
+        let Some(client_id) = self.foreground_client_id else {
+            return serde_json::to_string(&api::schema::SuccessResponse {
+                id,
+                result: ResponseResult::ClientOpenUrl {
+                    delivered: false,
+                    reason: ClientOpenUrlReason::NoForegroundClient,
+                },
+            })
+            .unwrap_or_else(|_| "{}".to_string());
+        };
+        let has_writer = self
+            .clients
+            .get(&client_id)
+            .is_some_and(|client| client.writer.is_some());
+        let delivered = has_writer
+            && crate::protocol::endpoint::open_url_message(url.as_str())
+                .is_ok_and(|message| self.send_to_client(client_id, message));
+        let reason = if delivered {
+            ClientOpenUrlReason::Forwarded
+        } else {
+            ClientOpenUrlReason::ForwardFailed
+        };
+        serde_json::to_string(&api::schema::SuccessResponse {
+            id,
+            result: ResponseResult::ClientOpenUrl { delivered, reason },
+        })
+        .unwrap_or_else(|_| "{}".to_string())
+    }
+
     fn drain_client_config_reload_request(&mut self) {
         if !self.app.state.request_client_config_reload {
             return;
@@ -2972,6 +3018,11 @@ impl HeadlessServer {
             }
             api::schema::Method::ClientWindowTitleClear(_) => {
                 let response = self.handle_client_window_title_api(msg.request.id.clone(), None);
+                let _ = msg.respond_to.send(response);
+                return true;
+            }
+            api::schema::Method::ClientOpenUrl(params) => {
+                let response = self.handle_client_open_url_api(msg.request.id.clone(), &params.url);
                 let _ = msg.respond_to.send(response);
                 return true;
             }

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::agents::AgentInfo;
-use super::common::{ClientWindowTitleReason, NotificationShowReason};
+use super::common::{ClientOpenUrlReason, ClientWindowTitleReason, NotificationShowReason};
 use super::events::EventEnvelope;
 use super::integrations::{
     IntegrationInstallResult, IntegrationTarget, IntegrationUninstallResult,
@@ -228,6 +228,10 @@ pub enum ResponseResult {
     ClientWindowTitle {
         changed: bool,
         reason: ClientWindowTitleReason,
+    },
+    ClientOpenUrl {
+        delivered: bool,
+        reason: ClientOpenUrlReason,
     },
     IntegrationList {
         integrations: Vec<super::integrations::IntegrationInfo>,

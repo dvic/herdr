@@ -1802,6 +1802,13 @@ async fn run_client_loop(
                         }
                     }
                     ServerMessage::EndpointControl { kind, data } => {
+                        if kind == crate::protocol::endpoint::OPEN_URL_KIND {
+                            shell_runtime::dispatch_open_url_control(
+                                &data,
+                                &mut state.detached_process_children,
+                            );
+                            continue;
+                        }
                         if kind == crate::protocol::endpoint::PRESENTATION_EFFECTS_READY_KIND {
                             let progress = pending_activation.as_mut().map(|activation| {
                                 activation.receive_presentation_effects_ready(

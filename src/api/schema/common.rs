@@ -61,6 +61,11 @@ pub struct ClientWindowTitleSetParams {
     pub title: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ClientOpenUrlParams {
+    pub url: String,
+}
+
 /// Updates whether the requesting client shell receives and controls pane presentation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ClientShellSurfaceSetParams {
@@ -144,6 +149,16 @@ pub enum ClientWindowTitleReason {
     Set,
     Cleared,
     NoForegroundClient,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientOpenUrlReason {
+    Forwarded,
+    DispatchedLocally,
+    NoForegroundClient,
+    ForwardFailed,
+    LocalDispatchFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

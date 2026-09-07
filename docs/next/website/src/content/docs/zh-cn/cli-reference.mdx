@@ -119,6 +119,14 @@ herdr notification show <title> [--body TEXT] [--position top-left|top-right|bot
 
 `notification show` 使用配置的 `[ui.toast]` 投递方式。`--position` 只影响 Herdr 应用内的 toast。`--sound` 默认为 `none`;`done` 和 `request` 只在通知实际显示时播放已有的完成音和需要关注音。
 
+## 打开 URL
+
+```bash
+herdr open-url <URL>
+```
+
+`open-url` 接受一个绝对 HTTP(S) URL，并在前台客户端上打开。它会输出结构化的 `client_open_url` 响应；如果没有符合条件的前台客户端或投递失败，则以非零状态退出。
+
 ## 会话
 
 ```bash

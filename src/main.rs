@@ -32,6 +32,7 @@ mod layout;
 mod logging;
 mod metadata_tokens;
 mod noninteractive_process;
+mod open_url;
 mod pane;
 mod pane_graphics_files;
 mod persist;

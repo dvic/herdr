@@ -27,6 +27,7 @@ pub const PRESENTATION_EFFECTS_READY_KIND: &str = "endpoint.presentation.ready.v
 pub const HEALTH_CHECK_CAPABILITY: &str = "health_check";
 pub const HEALTH_PING_KIND: &str = "endpoint.health.ping.v1";
 pub const HEALTH_PONG_KIND: &str = "endpoint.health.pong.v1";
+pub const OPEN_URL_KIND: &str = "host.open_url.v1";
 
 fn default_true() -> bool {
     true
@@ -74,6 +75,18 @@ pub struct EndpointServerWelcome {
     pub capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<EndpointHandshakeError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenUrlControl {
+    pub url: String,
+}
+
+pub fn open_url_message(url: &str) -> serde_json::Result<ServerMessage> {
+    Ok(ServerMessage::EndpointControl {
+        kind: OPEN_URL_KIND.into(),
+        data: serde_json::to_string(&OpenUrlControl { url: url.into() })?,
+    })
 }
 
 pub fn snapshot_message(snapshot: &ClientShellSnapshot) -> serde_json::Result<ServerMessage> {
@@ -241,6 +254,18 @@ mod tests {
         assert_eq!(kind, ENDPOINT_SNAPSHOT_KIND);
         let decoded: ClientShellSnapshot = serde_json::from_str(&data).unwrap();
         assert_eq!(decoded, snapshot);
+    }
+
+    #[test]
+    fn open_url_uses_an_optional_named_control() {
+        let ServerMessage::EndpointControl { kind, data } =
+            open_url_message("https://example.com/path?q=1").unwrap()
+        else {
+            panic!("open URL should use endpoint control");
+        };
+        assert_eq!(kind, OPEN_URL_KIND);
+        let decoded: OpenUrlControl = serde_json::from_str(&data).unwrap();
+        assert_eq!(decoded.url, "https://example.com/path?q=1");
     }
 
     #[test]

@@ -1004,6 +1004,34 @@ impl App {
                     },
                 );
             }
+            Method::ClientOpenUrl(params) => {
+                let (delivered, reason) = match crate::open_url::dispatch_locally(&params.url) {
+                    Ok(child) => {
+                        if let Some(child) = child {
+                            self.detached_process_children.push(child);
+                        }
+                        (
+                            true,
+                            crate::api::schema::ClientOpenUrlReason::DispatchedLocally,
+                        )
+                    }
+                    Err(crate::open_url::LocalDispatchError::Invalid) => {
+                        return responses::encode_error(
+                            request.id,
+                            "invalid_params",
+                            "url must be an absolute HTTP(S) URL with a host and valid encoding",
+                        );
+                    }
+                    Err(crate::open_url::LocalDispatchError::Open(_)) => (
+                        false,
+                        crate::api::schema::ClientOpenUrlReason::LocalDispatchFailed,
+                    ),
+                };
+                return responses::encode_success(
+                    request.id,
+                    ResponseResult::ClientOpenUrl { delivered, reason },
+                );
+            }
             Method::SessionSnapshot(_) => return self.handle_session_snapshot(request.id),
             Method::WorkspaceList(_) => return self.handle_workspace_list(request.id),
             Method::WorkspaceGet(target) => return self.handle_workspace_get(request.id, target),
